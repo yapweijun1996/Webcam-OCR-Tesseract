@@ -139,30 +139,10 @@ class ImageOCRTest {
             console.log('OCR Language:', this.selectedLanguage); // Debug log
             console.log('Image size:', this.previewImage.naturalWidth + 'x' + this.previewImage.naturalHeight); // Debug image size
 
-            // Perform OCR using Tesseract.js with optimized settings
-            const { data: { text, confidence } } = await Tesseract.recognize(
-                imageDataUrl,
-                this.selectedLanguage,
-                {
-                    logger: m => {
-                        console.log('Tesseract progress:', m);
-                        if (m.status === 'recognizing text') {
-                            this.setStatus(`Recognizing... ${Math.round(m.progress * 100)}%`, 'warning');
-                        }
-                    },
-                    // Enhanced Tesseract configuration for business cards
-                    tessedit_pageseg_mode: '6', // Uniform block of text
-                    tessedit_ocr_engine_mode: '2', // Use LSTM OCR engine
-                    preserve_interword_spaces: '1',
-                    tessedit_char_whitelist: this.getCharacterWhitelist(),
-                    // Additional accuracy improvements
-                    tessedit_enable_doc_dict: '1',
-                    language_model_penalty_non_freq_dict_word: '0.15',
-                    language_model_penalty_non_dict_word: '0.15',
-                    // Try different PSM modes if initial fails
-                    tessedit_pageseg_mode: '3' // Fully automatic
-                }
-            );
+            // Perform multiple OCR passes with different configurations for better accuracy
+            const ocrResults = await this.performMultipleOCRPasses(imageDataUrl);
+            const bestResult = this.selectBestOCRResult(ocrResults);
+            const { text, confidence } = bestResult;
 
             console.log('Raw OCR Result:', { text, confidence }); // Debug raw result
 
@@ -341,35 +321,45 @@ class ImageOCRTest {
     cleanOCRText(text) {
         if (!text) return '';
 
-        // Remove excessive special characters and symbols (keep meaningful punctuation)
+        // More aggressive symbol removal for business card noise
         let cleaned = text
             .replace(/[{}[\]"'=*]+/g, '')      // hard symbols
-            .replace(/[®©™•▫▪◆◇■□❖※‒–—―]+/g, '') // common noise from prints
-            .replace(/\|/g, 'I');               // common OCR confusions
+            .replace(/[®©™•▫▪◆◇■□❖※‒–—―\\\/|]+/g, '') // extended noise symbols including backslashes and pipes
+            .replace(/[~`^_]+/g, '')            // remove tildes, backticks, carets, underscores
+            .replace(/\|/g, 'I')                // common OCR confusions
+            .replace(/(\w)\s*-\s*(\w)/g, '$1$2') // remove hyphens between words that are likely part of the same word
+            .replace(/\s+/g, ' ');              // normalize whitespace
 
-        // Remove stray punctuation around words
-        cleaned = cleaned.replace(/\s+[;:]+/g, ' ').replace(/[;:]+\s+/g, ' ');
+        // Fix common OCR character confusions (generic patterns)
+        cleaned = cleaned.replace(/\|/g, 'I'); // Pipe to I
+        cleaned = cleaned.replace(/(\w)\s*-\s*(\w)/g, '$1$2'); // Remove hyphens between words
+        cleaned = cleaned.replace(/(\w)\s*\.\s*(\w)/g, '$1$2'); // Remove periods between words
+        cleaned = cleaned.replace(/\s+/g, ' '); // Normalize whitespace
 
-        // Email normalization (keep exact pattern)
-        cleaned = cleaned.replace(/([A-Za-z0-9._%+-]+)\s*@\s*([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g, '$1@$2');
+        // Email normalization with better pattern matching
+        cleaned = cleaned.replace(/([A-Za-z0-9._%+-]+)\s*@\s*([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g, (match, user, domain) => {
+            return user.toLowerCase() + '@' + domain.toLowerCase();
+        });
 
-        // Website normalization: "www .example .com" -> "www.example.com"
+        // Website normalization: handle various OCR spacing issues
         cleaned = cleaned.replace(/www\s*\.\s*/gi, 'www.');
         cleaned = cleaned.replace(/([A-Za-z0-9-])\s*\.\s*([A-Za-z0-9-])/g, '$1.$2');
         cleaned = cleaned.replace(/\s*\/\s*/g, '/');
+        cleaned = cleaned.replace(/(?:https?:\/\/)?(?:www\.)?([A-Za-z0-9-]+(?:\s*\.\s*[A-Za-z0-9-]+)+)/gi, (match, domain) => {
+            return 'www.' + domain.toLowerCase().replace(/\s+/g, '');
+        });
 
-        // Phone normalization: compress and pretty print if US-like
+        // Phone normalization: more flexible pattern
         cleaned = cleaned.replace(/\(?(\d{3})\)?[-.\s]*(\d{3})[-.\s]*(\d{4})/g, '($1) $2-$3');
 
-        // Collapse whitespace but keep line breaks meaningful
-        cleaned = cleaned.replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n');
-
-        // Remove lines that are mostly symbols or too short to be useful
+        // Remove lines that are mostly symbols or too short/meaningless
         const lines = cleaned.split('\n');
         const filteredLines = lines.filter(line => {
-            const symbolCount = (line.match(/[^A-Za-z0-9\s@.:/()-]/g) || []).length;
-            const alphaNumCount = (line.match(/[A-Za-z0-9]/g) || []).length;
-            return alphaNumCount >= 3 && alphaNumCount >= symbolCount;
+            const trimmed = line.trim();
+            if (trimmed.length < 2) return false;
+            const symbolCount = (trimmed.match(/[^A-Za-z0-9\s@.:/()-]/g) || []).length;
+            const alphaNumCount = (trimmed.match(/[A-Za-z0-9]/g) || []).length;
+            return alphaNumCount >= 2 && alphaNumCount > symbolCount;
         });
 
         return filteredLines.join('\n').trim();
@@ -502,40 +492,39 @@ class ImageOCRTest {
         return results;
     }
 
-    // Image preprocessing: scale 2x + grayscale + Otsu binarization for sharper OCR
+    // Image preprocessing: scale 4x + enhanced grayscale + adaptive binarization for sharper OCR
     async preprocessImageForOCR(dataUrl) {
         return new Promise((resolve) => {
             const img = new Image();
             img.onload = () => {
-                const scale = 2;
+                // Increase scale to 4x for better text detail capture
+                const scale = 4;
                 const w = Math.max(1, Math.floor(img.naturalWidth * scale));
                 const h = Math.max(1, Math.floor(img.naturalHeight * scale));
                 const canvas = document.createElement('canvas');
                 canvas.width = w;
                 canvas.height = h;
                 const ctx = canvas.getContext('2d');
-                ctx.imageSmoothingEnabled = true;
-                ctx.imageSmoothingQuality = 'high';
+                
+                // Disable smoothing for sharper edges
+                ctx.imageSmoothingEnabled = false;
                 ctx.drawImage(img, 0, 0, w, h);
 
                 let imageData = ctx.getImageData(0, 0, w, h);
                 const data = imageData.data;
-                const gray = new Uint8Array(w * h);
-                const hist = new Uint32Array(256);
-
-                // Build grayscale + histogram
-                for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-                    const g = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-                    gray[j] = g;
-                    hist[g]++;
+                
+                // Enhanced grayscale conversion with better weighting
+                for (let i = 0; i < data.length; i += 4) {
+                    const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+                    data[i] = data[i + 1] = data[i + 2] = gray;
                 }
-
-                // Otsu threshold
-                const threshold = this.otsuThreshold(hist, w * h);
-
-                // Binarize
-                for (let i = 0, j = 0; i < data.length; i += 4, j++) {
-                    const v = gray[j] > threshold ? 255 : 0;
+                
+                // Apply adaptive threshold instead of simple Otsu
+                const threshold = this.adaptiveThreshold(data, w, h);
+                
+                // Binarize with the adaptive threshold
+                for (let i = 0; i < data.length; i += 4) {
+                    const v = data[i] > threshold ? 255 : 0;
                     data[i] = data[i + 1] = data[i + 2] = v;
                     data[i + 3] = 255;
                 }
@@ -576,6 +565,125 @@ class ImageOCRTest {
             }
         }
         return threshold;
+    }
+
+    // Perform multiple OCR passes with different configurations
+    async performMultipleOCRPasses(imageDataUrl) {
+        const configurations = [
+            {
+                tessedit_pageseg_mode: '6', // Uniform block of text
+                tessedit_ocr_engine_mode: '2',
+                preserve_interword_spaces: '1',
+                tessedit_char_whitelist: this.getCharacterWhitelist(),
+                tessedit_enable_doc_dict: '1',
+                language_model_penalty_non_freq_dict_word: '0.15',
+                language_model_penalty_non_dict_word: '0.15'
+            },
+            {
+                tessedit_pageseg_mode: '3', // Fully automatic
+                tessedit_ocr_engine_mode: '2',
+                preserve_interword_spaces: '1',
+                tessedit_char_whitelist: this.getCharacterWhitelist(),
+                tessedit_enable_doc_dict: '1'
+            },
+            {
+                tessedit_pageseg_mode: '7', // Single text line
+                tessedit_ocr_engine_mode: '2',
+                preserve_interword_spaces: '1',
+                tessedit_char_whitelist: this.getCharacterWhitelist()
+            }
+        ];
+
+        const results = [];
+        for (const config of configurations) {
+            try {
+                const { data: { text, confidence } } = await Tesseract.recognize(
+                    imageDataUrl,
+                    this.selectedLanguage,
+                    {
+                        logger: () => {}, // Disable logging for individual passes
+                        ...config
+                    }
+                );
+                results.push({ text: text.trim(), confidence, config });
+            } catch (error) {
+                console.warn('OCR pass failed:', error);
+            }
+        }
+        return results;
+    }
+
+    // Select the best OCR result based on confidence and text quality
+    selectBestOCRResult(results) {
+        if (results.length === 0) {
+            return { text: '', confidence: 0 };
+        }
+
+        // Score each result based on confidence and text characteristics
+        const scoredResults = results.map(result => {
+            let score = result.confidence;
+            
+            // Bonus for results with emails, phones, or websites
+            const hasEmail = /@/.test(result.text);
+            const hasPhone = /\d{3}/.test(result.text);
+            const hasWebsite = /www\./i.test(result.text);
+            
+            if (hasEmail) score += 20;
+            if (hasPhone) score += 10;
+            if (hasWebsite) score += 15;
+            
+            // Penalty for too many symbols
+            const symbolCount = (result.text.match(/[^A-Za-z0-9\s@.:/()-]/g) || []).length;
+            const alphaNumCount = (result.text.match(/[A-Za-z0-9]/g) || []).length;
+            if (alphaNumCount > 0) {
+                const symbolRatio = symbolCount / alphaNumCount;
+                score -= symbolRatio * 10;
+            }
+            
+            return { ...result, score };
+        });
+
+        // Return the result with the highest score
+        scoredResults.sort((a, b) => b.score - a.score);
+        return { text: scoredResults[0].text, confidence: scoredResults[0].confidence };
+    }
+
+    // New adaptive threshold method for better binarization
+    adaptiveThreshold(data, width, height) {
+        const blockSize = 15; // Size of the neighborhood area
+        const C = -10; // Constant to subtract from the mean
+        const thresholded = new Uint8Array(width * height);
+
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const index = y * width + x;
+                let sum = 0;
+                let count = 0;
+
+                // Calculate local mean in the block
+                for (let i = -Math.floor(blockSize / 2); i <= Math.floor(blockSize / 2); i++) {
+                    for (let j = -Math.floor(blockSize / 2); j <= Math.floor(blockSize / 2); j++) {
+                        const nx = x + j;
+                        const ny = y + i;
+                        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                            sum += data[(ny * width + nx) * 4]; // Grayscale value
+                            count++;
+                        }
+                    }
+                }
+
+                const mean = sum / count;
+                thresholded[index] = data[index * 4] > mean + C ? 255 : 0;
+            }
+        }
+
+        // Copy thresholded values back to data
+        for (let i = 0; i < data.length; i += 4) {
+            const index = i / 4;
+            data[i] = data[i + 1] = data[i + 2] = thresholded[index];
+        }
+
+        return 128; // Return a default threshold value
     }
 }
 
