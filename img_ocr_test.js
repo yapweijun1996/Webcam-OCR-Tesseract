@@ -498,7 +498,7 @@ class ImageOCRTest {
             // Email
             await this.tesseractWorker.setParameters({
                 tessedit_pageseg_mode: '7', // Assume a single uniform block of text.
-                tessedit_ocr_engine_mode: '1', // LSTM only
+                tessedit_ocr_engine_mode: '1', // LSTM only (must be set during init)
                 preserve_interword_spaces: '1',
                 tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-@'
             });
@@ -590,6 +590,63 @@ class ImageOCRTest {
 
         const averageBrightness = brightness / samples;
         return averageBrightness / 255;
+    }
+
+    // Calculate image stats from processed canvas
+    calculateImageStatsFromCanvas(canvas) {
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const { width: w, height: h } = canvas;
+        const { data } = ctx.getImageData(0, 0, w, h);
+
+        let brightness = 0;
+        let contrast = 0;
+        const samples = Math.min(data.length / 4, 10000);
+
+        for (let i = 0; i < samples; i++) {
+            const index = Math.floor((i / samples) * (data.length / 4)) * 4;
+            const r = data[index];
+            const g = data[index + 1];
+            const b = data[index + 2];
+            const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+            brightness += gray;
+            contrast += gray * gray;
+        }
+
+        const avgBrightness = brightness / samples;
+        const meanSquare = contrast / samples;
+        const rms = Math.sqrt(meanSquare);
+        const normalizedContrast = rms / 255;
+
+        return {
+            brightness: avgBrightness / 255,
+            contrast: Math.max(0, Math.min(1, normalizedContrast))
+        };
+    }
+
+    // Auto-invert detection for light text on dark background
+    shouldAutoInvert(imageData) {
+        const data = imageData.data;
+        let sum = 0;
+        const samples = Math.min(data.length / 4, 5000);
+
+        for (let i = 0; i < samples; i++) {
+            const index = Math.floor((i / samples) * (data.length / 4)) * 4;
+            const gray = data[index]; // Already grayscale
+            sum += gray;
+        }
+
+        const mean = sum / samples;
+        // If mean is very low (< 110) or very high (> 170), likely needs inversion
+        return mean < 110 || mean > 170;
+    }
+
+    // Invert image data
+    invertImage(data) {
+        for (let i = 0; i < data.length; i += 4) {
+            data[i] = 255 - data[i];     // R
+            data[i + 1] = 255 - data[i + 1]; // G
+            data[i + 2] = 255 - data[i + 2]; // B
+        }
     }
 
     // Get historical accuracy for confidence weighting
@@ -1261,35 +1318,16 @@ class ImageOCRTest {
         return [...new Set(phones)];
     }
 
-    // Email validation with basic domain checking
+    // Email validation with modern TLD support
     isValidEmail(email) {
-        if (!email || !/@/.test(email)) return false;
-
-        const [user, domain] = email.split('@');
-        if (!user || !domain) return false;
-
-        // Basic domain validation
-        const domainParts = domain.split('.');
-        if (domainParts.length < 2) return false;
-
-        const tld = domainParts[domainParts.length - 1];
-        const validTlds = ['com', 'org', 'net', 'edu', 'gov', 'mil', 'info', 'biz', 'co', 'uk', 'in', 'au', 'ca'];
-
-        return validTlds.includes(tld.toLowerCase()) && domainParts.every(part => part.length > 0);
+        return /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$/.test(email);
     }
 
-    // Website validation
+    // Website validation with modern TLD support
     isValidWebsite(website) {
         if (!website) return false;
-
-        // Remove protocol if present
-        const cleanWebsite = website.replace(/^https?:\/\//, '').replace(/^www\./, '');
-
-        // Basic domain validation
-        const domainParts = cleanWebsite.split('.');
-        if (domainParts.length < 2) return false;
-
-        return domainParts.every(part => part.length > 0 && /^[A-Za-z0-9-]+$/.test(part));
+        const host = website.replace(/^https?:\/\//, '').replace(/^www\./, '');
+        return /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+(:\d+)?(\/.*)?$/.test(host);
     }
 
     // Phone validation
@@ -1457,7 +1495,6 @@ class ImageOCRTest {
         for (const p of passes) {
             try {
                 await this.tesseractWorker.setParameters({
-                    tessedit_ocr_engine_mode: '1', // LSTM only
                     tessedit_enable_doc_dict: '1',
                     tessedit_char_whitelist: this.getCharacterWhitelist(),
                     preserve_interword_spaces: '1',
