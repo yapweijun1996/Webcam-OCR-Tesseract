@@ -49,11 +49,21 @@
                    </div>
 
                    <div class="control-group">
-                       <label>Language Support</label>
+                       <label for="languageSelect">Language Selection</label>
+                       <select id="languageSelect" class="language-select">
+                           <option value="eng" selected>English</option>
+                           <option value="chi_sim">中文简体 (Chinese Simplified)</option>
+                           <option value="eng+chi_sim">English + 中文简体</option>
+                           <option value="jpn">日本語 (Japanese)</option>
+                           <option value="kor">한국어 (Korean)</option>
+                           <option value="tha">ไทย (Thai)</option>
+                           <option value="ara">العربية (Arabic)</option>
+                           <option value="rus">Русский (Russian)</option>
+                           <option value="fra">Français (French)</option>
+                           <option value="deu">Deutsch (German)</option>
+                       </select>
                        <div class="language-info">
-                           <small>English + 中文简体 (Chinese Simplified)</small>
-                           <br>
-                           <small>Click capture button to recognize text in camera view</small>
+                           <small>Select OCR language before capturing</small>
                        </div>
                    </div>
 
@@ -90,11 +100,6 @@
                 </div>
             </section>
 
-            <!-- Processing Indicator -->
-            <div id="processingIndicator" class="processing-indicator" style="display: none;">
-                <div class="spinner"></div>
-                <p>Processing...</p>
-            </div>
         </main>
 
         <!-- Footer -->

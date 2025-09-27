@@ -10,15 +10,17 @@ class WebcamOCR {
         this.statusText = document.querySelector('.status-text');
         this.statusDot = document.querySelector('.status-dot');
         this.resultsList = document.getElementById('resultsList');
-        this.processingIndicator = document.getElementById('processingIndicator');
+        this.topLoader = document.getElementById('topLoader');
         this.errorMessage = document.getElementById('errorMessage');
         this.errorText = document.querySelector('.error-text');
+        this.languageSelect = document.getElementById('languageSelect');
 
         this.stream = null;
         this.isProcessing = false;
         this.recognitionHistory = [];
         this.isAutoCapturing = false;
         this.autoCaptureInterval = null;
+        this.selectedLanguage = 'eng';
 
         this.initializeEventListeners();
         this.updateDebugInfo();
@@ -31,6 +33,13 @@ class WebcamOCR {
         this.captureBtn = document.getElementById('captureBtn');
         if (this.captureBtn) {
             this.captureBtn.addEventListener('click', () => this.toggleAutoCapture());
+        }
+
+        // Language selection
+        if (this.languageSelect) {
+            this.languageSelect.addEventListener('change', (e) => {
+                this.selectedLanguage = e.target.value;
+            });
         }
 
         // Handle page visibility changes
@@ -65,6 +74,11 @@ class WebcamOCR {
 
             this.setStatus('Camera active', 'success');
             this.updateDebugInfo();
+
+            // Auto-start auto-capture mode
+            this.startAutoCapture(2000);
+            this.isAutoCapturing = true;
+            this.captureBtn.textContent = '⏹️ Stop Auto Capture';
 
         } catch (error) {
             console.error('Camera access error:', error);
@@ -103,27 +117,37 @@ class WebcamOCR {
             this.showProcessing(true);
             this.setStatus('Processing...', 'warning');
 
-            // Capture frame from video
+            // Capture frame from video with preprocessing
             const context = this.canvas.getContext('2d');
             this.canvas.width = this.video.videoWidth;
             this.canvas.height = this.video.videoHeight;
+
+            // Draw video frame
             context.drawImage(this.video, 0, 0);
+
+            // Enhance image for better OCR accuracy
+            this.preprocessImage(context);
 
             // Convert to image data URL
             const imageDataUrl = this.canvas.toDataURL('image/png');
 
             this.setStatus('Recognizing text...', 'warning');
 
-            // Perform OCR using Tesseract.js
+            // Perform OCR using Tesseract.js with optimized settings
             const { data: { text, confidence } } = await Tesseract.recognize(
                 imageDataUrl,
-                'eng+chi_sim',
+                this.selectedLanguage,
                 {
                     logger: m => {
                         if (m.status === 'recognizing text') {
                             this.setStatus(`Recognizing... ${Math.round(m.progress * 100)}%`, 'warning');
                         }
-                    }
+                    },
+                    // Optimized Tesseract configuration for better accuracy
+                    tessedit_pageseg_mode: '6', // Uniform block of text
+                    tessedit_ocr_engine_mode: '2', // Use LSTM OCR engine
+                    preserve_interword_spaces: '1',
+                    tessedit_char_whitelist: this.getCharacterWhitelist()
                 }
             );
 
@@ -266,8 +290,26 @@ class WebcamOCR {
         return 'low-confidence';
     }
 
+    getCharacterWhitelist() {
+        // Return character whitelist based on selected language for better accuracy
+        switch (this.selectedLanguage) {
+            case 'eng':
+                return 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,!?-()';
+            case 'chi_sim':
+                return '的一是在不了有和人了这上着个地到大里说去子得也起时来二点是两为道做种开见面天后前头同经发成向而多全三小口女白子四五目耳手文其业本民力此处求金长得色只关信间三小口女白子四五目耳手文其业本民力此处求金长得色只关信间';
+            case 'jpn':
+                return 'あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをんアイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789 .,!?-()';
+            case 'kor':
+                return 'ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎㅏㅑㅓㅕㅗㅛㅜㅠㅡㅣabcdefghijklnmopqrstuvwxyzABCDEFGHIJKLNMOPQRSTUVWXYZ0123456789 .,!?-()';
+            default:
+                return ''; // No whitelist for mixed languages
+        }
+    }
+
     showProcessing(show) {
-        this.processingIndicator.style.display = show ? 'flex' : 'none';
+        if (this.topLoader) {
+            this.topLoader.style.display = show ? 'block' : 'none';
+        }
     }
 
     showError(message) {

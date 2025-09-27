@@ -38,13 +38,16 @@ body {
 }
 
 .app-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: var(--spacing);
-  border-bottom: 1px solid var(--border);
-  position: relative;
-  overflow: hidden;
+   display: flex;
+   justify-content: space-between;
+   align-items: center;
+   padding: var(--spacing);
+   border-bottom: 1px solid var(--border);
+   position: sticky;
+   top: 0px;
+   background-color: var(--surface);
+   z-index: 1000;
+   overflow: hidden;
 }
 
 .top-loader {
@@ -324,10 +327,28 @@ body {
 }
 
 .language-info {
-   display: flex;
-   flex-direction: column;
-   gap: 0.5rem;
-   color: var(--text-secondary);
-   font-size: 0.875rem;
-   line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    line-height: 1.4;
+}
+
+.language-select {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background-color: var(--surface);
+    color: var(--text);
+    font-size: 1rem;
+    font-family: var(--font-family);
+    margin-bottom: 0.5rem;
+}
+
+.language-select:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.2);
 }
