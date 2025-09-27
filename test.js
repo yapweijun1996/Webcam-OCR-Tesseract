@@ -163,9 +163,14 @@ class ImageOCRTest {
                 }
             );
 
+            console.log('Raw OCR Result:', { text, confidence }); // Debug raw result
+
+            // Clean up the text result
+            const cleanedText = this.cleanOCRText(text);
+
             // Add result to history
             const result = {
-                text: text.trim(),
+                text: cleanedText,
                 confidence: Math.round(confidence),
                 timestamp: new Date().toLocaleTimeString(),
                 imageData: imageDataUrl,
@@ -318,7 +323,7 @@ class ImageOCRTest {
         // Return character whitelist based on selected language for better accuracy
         switch (this.selectedLanguage) {
             case 'eng':
-                return 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,!?-()';
+                return 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,!?-()@';
             case 'chi_sim':
                 return '的一是在不了有和人了这上着个地到大里说去子得也起时来二点是两为道做种开见面天后前头同经发成向而多全三小口女白子四五目耳手文其业本民力此处求金长得色只关信间三小口女白子四五目耳手文其业本民力此处求金长得色只关信间';
             case 'jpn':
@@ -328,6 +333,43 @@ class ImageOCRTest {
             default:
                 return ''; // No whitelist for mixed languages
         }
+    }
+
+    cleanOCRText(text) {
+        if (!text) return '';
+
+        // Remove excessive special characters and symbols
+        let cleaned = text.replace(/[=(){}[\]"']/g, '');
+
+        // Fix common OCR mistakes
+        cleaned = cleaned.replace(/\|/g, 'I');
+        cleaned = cleaned.replace(/\*/g, '');
+        cleaned = cleaned.replace(/\+/g, '');
+        cleaned = cleaned.replace(/½/g, '');
+        cleaned = cleaned.replace(/¼/g, '');
+
+        // Fix email patterns
+        cleaned = cleaned.replace(/([a-zA-Z0-9_.+-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)/g, '$1@$2');
+
+        // Fix phone number patterns
+        cleaned = cleaned.replace(/\(?(\d{3})\)?[-.\s]*(\d{3})[-.\s]*(\d{4})/g, '($1) $2-$3');
+
+        // Remove standalone symbols but keep meaningful ones
+        cleaned = cleaned.replace(/\b[=:]+\b/g, '');
+
+        // Clean up extra whitespace
+        cleaned = cleaned.replace(/\s+/g, ' ');
+        cleaned = cleaned.replace(/\n+/g, '\n');
+
+        // Remove lines that are mostly symbols
+        const lines = cleaned.split('\n');
+        const filteredLines = lines.filter(line => {
+            const symbolCount = (line.match(/[^a-zA-Z0-9\s@.-]/g) || []).length;
+            const alphaNumCount = (line.match(/[a-zA-Z0-9]/g) || []).length;
+            return alphaNumCount > symbolCount || alphaNumCount > 2;
+        });
+
+        return filteredLines.join('\n').trim();
     }
 }
 
