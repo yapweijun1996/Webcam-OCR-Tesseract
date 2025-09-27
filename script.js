@@ -21,9 +21,60 @@ class WebcamOCR {
         this.isAutoCapturing = false;
         this.autoCaptureInterval = null;
         this.selectedLanguage = 'eng';
+        this.tesseractWorker = null; // To hold the Tesseract worker instance
 
         this.initializeEventListeners();
         this.updateDebugInfo();
+        this.initializeOCR(); // Initialize Tesseract worker on startup
+        this.interceptNetworkRequests(); // Intercept any network requests
+    }
+
+    interceptNetworkRequests() {
+        // Override fetch to log and redirect Tesseract.js requests
+        const originalFetch = window.fetch;
+        window.fetch = async (url, options) => {
+            console.log('🔍 Network request intercepted:', url);
+
+            // Redirect Tesseract.js CDN requests to local files
+            if (url.includes('tesseract.js') && url.includes('cdn.jsdelivr.net')) {
+                console.log('📁 Redirecting CDN request to local file:', url);
+                if (url.includes('worker.min.js')) {
+                    return originalFetch('./tesseract-local/worker.min.js', options);
+                } else if (url.includes('tesseract-core')) {
+                    return originalFetch('./tesseract-local/tesseract-core-simd-lstm.wasm.js', options);
+                }
+            }
+
+            // For all other requests, use original fetch
+            return originalFetch(url, options);
+        };
+        console.log('✅ Network request interceptor installed');
+    }
+
+    async initializeOCR() {
+        console.log('🚀 Starting OCR initialization...');
+        try {
+            console.log('📋 Initializing Tesseract worker with local files...');
+            this.setStatus('Initializing OCR...', 'warning');
+            this.tesseractWorker = await Tesseract.createWorker(this.selectedLanguage, 1, {
+                // Explicitly define local paths for offline use
+                workerPath: './tesseract-local/worker.min.js',
+                corePath: './tesseract-local/tesseract-core-simd-lstm.wasm.js',
+                langPath: './', // Use local language files
+                logger: m => {
+                    console.log('🔄 Tesseract status:', m.status, m.progress ? Math.round(m.progress * 100) + '%' : '');
+                    if (m.status === 'loading language traineddata') {
+                        this.setStatus(`Loading ${this.selectedLanguage} model...`, 'warning');
+                    }
+                },
+            });
+            console.log('✅ Tesseract worker initialized successfully');
+            this.setStatus('OCR Ready', 'success');
+        } catch (error) {
+            console.error('❌ Failed to initialize Tesseract worker:', error);
+            this.showError('Could not initialize the OCR engine. Please refresh the page.');
+            this.setStatus('OCR Init Failed', 'error');
+        }
     }
 
     initializeEventListeners() {
@@ -39,6 +90,7 @@ class WebcamOCR {
         if (this.languageSelect) {
             this.languageSelect.addEventListener('change', (e) => {
                 this.selectedLanguage = e.target.value;
+                this.loadLanguage(this.selectedLanguage);
             });
         }
 
@@ -108,7 +160,10 @@ class WebcamOCR {
     }
 
     async captureAndRecognize() {
-        if (this.isProcessing || !this.stream) {
+        if (this.isProcessing || !this.stream || !this.tesseractWorker) {
+            if (!this.tesseractWorker) {
+                this.showError('OCR engine is not ready.');
+            }
             return;
         }
 
@@ -133,28 +188,15 @@ class WebcamOCR {
 
             this.setStatus('Recognizing text...', 'warning');
 
-            // Perform OCR using Tesseract.js with optimized settings
-            const { data: { text, confidence } } = await Tesseract.recognize(
-                imageDataUrl,
-                this.selectedLanguage,
-                {
-                    logger: m => {
-                        if (m.status === 'recognizing text') {
-                            this.setStatus(`Recognizing... ${Math.round(m.progress * 100)}%`, 'warning');
-                        }
-                    },
-                    // Enhanced Tesseract configuration for business cards
-                    tessedit_pageseg_mode: '11', // Sparse text
-                    tessedit_ocr_engine_mode: '2', // Use LSTM OCR engine
-                    preserve_interword_spaces: '1',
-                    tessedit_char_whitelist: this.getCharacterWhitelist(),
-                    // Additional accuracy improvements
-                    tessedit_enable_doc_dict: '1',
-                    tessedit_pageseg_mode: '3', // Fully automatic page segmentation
-                    language_model_penalty_non_freq_dict_word: '0.15',
-                    language_model_penalty_non_dict_word: '0.15'
-                }
-            );
+            // Set Tesseract parameters for this recognition job
+            await this.tesseractWorker.setParameters({
+                tessedit_pageseg_mode: '11', // Sparse text with OSD
+                preserve_interword_spaces: '1',
+                tessedit_char_whitelist: this.getCharacterWhitelist(),
+            });
+
+            // Perform OCR using the pre-initialized worker
+            const { data: { text, confidence } } = await this.tesseractWorker.recognize(imageDataUrl);
 
             // Add result to history
             const result = {
@@ -289,6 +331,23 @@ class WebcamOCR {
         }
     }
 
+    async loadLanguage(lang) {
+        if (!this.tesseractWorker) {
+            this.showError('OCR worker not initialized.');
+            return;
+        }
+        try {
+            this.setStatus(`Loading ${lang} model...`, 'warning');
+            await this.tesseractWorker.loadLanguage(lang);
+            await this.tesseractWorker.initialize(lang);
+            this.setStatus('Language model loaded', 'success');
+        } catch (error) {
+            console.error(`Failed to load language ${lang}:`, error);
+            this.showError(`Failed to load language model for ${lang}.`);
+            this.setStatus('Language Error', 'error');
+        }
+    }
+
     getConfidenceClass(confidence) {
         if (confidence >= 80) return 'high-confidence';
         if (confidence >= 60) return 'medium-confidence';
@@ -402,17 +461,3 @@ class WebcamOCR {
 document.addEventListener('DOMContentLoaded', () => {
     window.webcamOCR = new WebcamOCR();
 });
-
-// Add Tesseract.js CDN script if not already present
-if (!document.querySelector('script[src*="tesseract"]')) {
-    const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-    script.onload = () => {
-        console.log('Tesseract.js loaded successfully');
-    };
-    script.onerror = () => {
-        console.error('Failed to load Tesseract.js');
-        document.querySelector('.status-text').textContent = 'Failed to load OCR library';
-    };
-    document.head.appendChild(script);
-}
