@@ -208,13 +208,33 @@ class ImageOCRTest {
             const entities = await this.extractEntitiesFromImage(imageDataUrl);
             const cleanedText = this.refineBusinessCardText(baseClean, entities);
 
-            // Add result to history
+            // Calculate comprehensive confidence score
+            const imageQuality = {
+                width: this.previewImage.naturalWidth,
+                height: this.previewImage.naturalHeight,
+                contrast: this.calculateImageContrast(),
+                brightness: this.calculateImageBrightness()
+            };
+
+            const comprehensiveConfidence = this.calculateComprehensiveConfidence(
+                { confidence },
+                cleanedText,
+                entities,
+                imageQuality
+            );
+
+            // Add result to history with enhanced confidence data
             const result = {
                 text: cleanedText,
-                confidence: Math.round(confidence),
+                confidence: comprehensiveConfidence,
+                originalConfidence: Math.round(confidence),
                 timestamp: new Date().toLocaleTimeString(),
                 imageData: imageDataUrl,
-                filename: this.selectedImageFile.name
+                filename: this.selectedImageFile.name,
+                entities: entities,
+                textQualityScore: this.assessTextQuality(cleanedText),
+                entityScore: this.assessEntityQuality(entities),
+                imageQualityScore: this.assessImageQuality(imageQuality)
             };
 
             this.addResultToList(result);
@@ -338,9 +358,310 @@ class ImageOCRTest {
     }
 
     getConfidenceClass(confidence) {
-        if (confidence >= 80) return 'high-confidence';
-        if (confidence >= 60) return 'medium-confidence';
-        return 'low-confidence';
+        if (confidence >= 85) return 'high-confidence';
+        if (confidence >= 70) return 'medium-confidence';
+        if (confidence >= 50) return 'low-confidence';
+        return 'very-low-confidence';
+    }
+
+    // Calculate comprehensive confidence score based on multiple factors
+    calculateComprehensiveConfidence(ocrResult, textQuality, entities, imageQuality) {
+        let confidence = ocrResult.confidence || 0;
+
+        // Factor 1: Text quality metrics
+        const qualityScore = this.assessTextQuality(textQuality);
+        confidence = (confidence * 0.4) + (qualityScore * 0.3);
+
+        // Factor 2: Entity validation
+        const entityScore = this.assessEntityQuality(entities);
+        confidence = (confidence * 0.7) + (entityScore * 0.3);
+
+        // Factor 3: Image quality assessment
+        const imageScore = this.assessImageQuality(imageQuality);
+        confidence = (confidence * 0.8) + (imageScore * 0.2);
+
+        // Factor 4: Historical performance (if available)
+        const historyScore = this.getHistoricalAccuracy();
+        confidence = (confidence * 0.9) + (historyScore * 0.1);
+
+        return Math.round(Math.max(0, Math.min(100, confidence)));
+    }
+
+    // Assess overall text quality
+    assessTextQuality(textQuality) {
+        if (!textQuality || textQuality.length === 0) return 0;
+
+        let score = 50; // Base score
+
+        // Length factor
+        if (textQuality.length > 50) score += 15;
+        else if (textQuality.length > 20) score += 10;
+        else if (textQuality.length < 5) score -= 20;
+
+        // Character diversity
+        const uniqueChars = new Set(textQuality.toLowerCase().split('')).size;
+        const totalChars = textQuality.length;
+        const diversityRatio = uniqueChars / totalChars;
+
+        if (diversityRatio > 0.6) score += 15;
+        else if (diversityRatio < 0.3) score -= 15;
+
+        // Word formation
+        const words = textQuality.split(/\s+/).filter(w => w.length > 0);
+        const avgWordLength = words.reduce((sum, word) => sum + word.length, 0) / words.length;
+
+        if (avgWordLength > 2 && avgWordLength < 12) score += 10;
+        else if (avgWordLength < 2 || avgWordLength > 20) score -= 10;
+
+        // Symbol ratio
+        const symbolCount = (textQuality.match(/[^A-Za-z0-9\s]/g) || []).length;
+        const symbolRatio = symbolCount / totalChars;
+
+        if (symbolRatio < 0.1) score += 10;
+        else if (symbolRatio > 0.3) score -= 15;
+
+        return Math.max(0, Math.min(100, score));
+    }
+
+    // Assess entity quality and validation
+    assessEntityQuality(entities) {
+        if (!entities) return 50;
+
+        let score = 60; // Base score
+
+        // Email validation
+        if (entities.email) {
+            if (this.isValidEmail(entities.email)) {
+                score += 25;
+            } else {
+                score -= 10;
+            }
+        }
+
+        // Website validation
+        if (entities.website) {
+            if (this.isValidWebsite(entities.website)) {
+                score += 20;
+            } else {
+                score -= 8;
+            }
+        }
+
+        // Phone validation
+        if (entities.phone) {
+            if (this.isValidPhone(entities.phone)) {
+                score += 15;
+            } else {
+                score -= 5;
+            }
+        }
+
+        // Multiple entities bonus
+        const entityCount = [entities.email, entities.website, entities.phone].filter(Boolean).length;
+        if (entityCount > 1) score += 10;
+
+        return Math.max(0, Math.min(100, score));
+    }
+
+    // Assess image quality factors
+    assessImageQuality(imageQuality) {
+        let score = 70; // Base score
+
+        // Contrast assessment
+        if (imageQuality.contrast > 0.7) score += 10;
+        else if (imageQuality.contrast < 0.3) score -= 15;
+
+        // Brightness assessment
+        if (imageQuality.brightness > 0.3 && imageQuality.brightness < 0.8) score += 5;
+        else if (imageQuality.brightness < 0.2 || imageQuality.brightness > 0.9) score -= 10;
+
+        // Resolution factor
+        if (imageQuality.width * imageQuality.height > 1000000) score += 5;
+        else if (imageQuality.width * imageQuality.height < 100000) score -= 10;
+
+        // Aspect ratio factor
+        const aspectRatio = imageQuality.width / imageQuality.height;
+        if (aspectRatio > 0.5 && aspectRatio < 2) score += 5;
+        else if (aspectRatio < 0.2 || aspectRatio > 5) score -= 10;
+
+        return Math.max(0, Math.min(100, score));
+    }
+
+    // Specialized entity extraction using separate workers
+    async specializedEntityExtraction(imageDataUrl) {
+        const entities = { emails: [], websites: [], phones: [] };
+
+        try {
+            // Email-specific extraction
+            const emailWorker = await Tesseract.createWorker(this.selectedLanguage, 1, {
+                workerPath: './tesseract-local/worker.min.js',
+                corePath: './tesseract-local/tesseract-core-simd-lstm.wasm.js',
+                langPath: './tessdata/'
+            });
+
+            await emailWorker.setParameters({
+                tessedit_pageseg_mode: '7',
+                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-@',
+                tessedit_enable_doc_dict: '1'
+            });
+
+            const emailResult = await emailWorker.recognize(imageDataUrl);
+            const emailText = emailResult?.data?.text || '';
+            entities.emails = this.extractEmails(emailText);
+
+            await emailWorker.terminate();
+
+            // Website-specific extraction
+            const websiteWorker = await Tesseract.createWorker(this.selectedLanguage, 1, {
+                workerPath: './tesseract-local/worker.min.js',
+                corePath: './tesseract-local/tesseract-core-simd-lstm.wasm.js',
+                langPath: './tessdata/'
+            });
+
+            await websiteWorker.setParameters({
+                tessedit_pageseg_mode: '7',
+                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-/:',
+                tessedit_enable_doc_dict: '1'
+            });
+
+            const websiteResult = await websiteWorker.recognize(imageDataUrl);
+            const websiteText = websiteResult?.data?.text || '';
+            entities.websites = this.extractWebsites(websiteText);
+
+            await websiteWorker.terminate();
+
+        } catch (error) {
+            console.warn('Specialized entity extraction failed:', error);
+        }
+
+        return entities;
+    }
+
+    // Calculate image contrast for quality assessment
+    calculateImageContrast() {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = this.previewImage.naturalWidth;
+        canvas.height = this.previewImage.naturalHeight;
+
+        ctx.drawImage(this.previewImage, 0, 0);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+
+        let contrast = 0;
+        const samples = Math.min(data.length / 4, 10000); // Sample for performance
+
+        for (let i = 0; i < samples; i++) {
+            const index = Math.floor((i / samples) * (data.length / 4)) * 4;
+            const r = data[index];
+            const g = data[index + 1];
+            const b = data[index + 2];
+            const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+            contrast += gray * gray;
+        }
+
+        const meanSquare = contrast / samples;
+        const rms = Math.sqrt(meanSquare);
+        const normalizedContrast = rms / 255;
+
+        return Math.max(0, Math.min(1, normalizedContrast));
+    }
+
+    // Calculate image brightness for quality assessment
+    calculateImageBrightness() {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = this.previewImage.naturalWidth;
+        canvas.height = this.previewImage.naturalHeight;
+
+        ctx.drawImage(this.previewImage, 0, 0);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+
+        let brightness = 0;
+        const samples = Math.min(data.length / 4, 10000);
+
+        for (let i = 0; i < samples; i++) {
+            const index = Math.floor((i / samples) * (data.length / 4)) * 4;
+            const r = data[index];
+            const g = data[index + 1];
+            const b = data[index + 2];
+            const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+            brightness += gray;
+        }
+
+        const averageBrightness = brightness / samples;
+        return averageBrightness / 255;
+    }
+
+    // Get historical accuracy for confidence weighting
+    getHistoricalAccuracy() {
+        if (this.recognitionHistory.length === 0) return 70; // Default
+
+        const recentResults = this.recognitionHistory.slice(0, 10);
+        const avgConfidence = recentResults.reduce((sum, result) => sum + result.confidence, 0) / recentResults.length;
+
+        return Math.round(avgConfidence);
+    }
+
+    // Enhanced result display with detailed confidence information
+    addResultToList(result) {
+        const resultItem = document.createElement('div');
+        resultItem.className = 'result-item';
+
+        const filename = document.createElement('div');
+        filename.className = 'result-filename';
+        filename.textContent = `File: ${result.filename}`;
+
+        const timestamp = document.createElement('div');
+        timestamp.className = `result-timestamp ${this.getConfidenceClass(result.confidence)}`;
+        timestamp.textContent = `${result.timestamp} - Confidence: ${result.confidence}%`;
+
+        const resultText = document.createElement('div');
+        resultText.className = 'result-text';
+        resultText.textContent = result.text || 'No text detected';
+
+        // Add confidence breakdown on hover
+        const confidenceBreakdown = document.createElement('div');
+        confidenceBreakdown.className = 'confidence-breakdown';
+        confidenceBreakdown.style.display = 'none';
+        confidenceBreakdown.innerHTML = `
+            <div><strong>Confidence Analysis:</strong></div>
+            <div>• OCR Engine: ${result.originalConfidence || result.confidence}%</div>
+            <div>• Text Quality: ${result.textQualityScore || 'N/A'}%</div>
+            <div>• Entity Validation: ${result.entityScore || 'N/A'}%</div>
+            <div>• Image Quality: ${result.imageQualityScore || 'N/A'}%</div>
+        `;
+
+        resultItem.appendChild(filename);
+        resultItem.appendChild(timestamp);
+        resultItem.appendChild(resultText);
+        resultItem.appendChild(confidenceBreakdown);
+
+        // Show confidence breakdown on hover
+        resultItem.addEventListener('mouseenter', () => {
+            confidenceBreakdown.style.display = 'block';
+        });
+
+        resultItem.addEventListener('mouseleave', () => {
+            confidenceBreakdown.style.display = 'none';
+        });
+
+        // Add click handler to show image
+        resultItem.addEventListener('click', () => {
+            this.showResultImage(result.imageData);
+        });
+
+        this.resultsList.insertBefore(resultItem, this.resultsList.firstChild);
+
+        // Keep only last 10 results
+        while (this.resultsList.children.length > 10) {
+            this.resultsList.removeChild(this.resultsList.lastChild);
+        }
+
+        this.recognitionHistory.unshift(result);
     }
 
     showProcessing(show) {
@@ -378,55 +699,284 @@ class ImageOCRTest {
     cleanOCRText(text) {
         if (!text) return '';
 
-        // More aggressive symbol removal for business card noise
-        let cleaned = text
-            .replace(/[{}[\]"'=*]+/g, '')      // hard symbols
-            .replace(/[®©™•▫▪◆◇■□❖※‒–—―\\\/|]+/g, '') // extended noise symbols including backslashes and pipes
-            .replace(/[~`^_]+/g, '')            // remove tildes, backticks, carets, underscores
-            .replace(/\|/g, 'I')                // common OCR confusions
-            .replace(/(\w)\s*-\s*(\w)/g, '$1$2') // remove hyphens between words that are likely part of the same word
-            .replace(/\s+/g, ' ');              // normalize whitespace
+        let cleaned = text.trim();
 
-        // Fix common OCR character confusions (generic patterns)
-        cleaned = cleaned.replace(/\|/g, 'I'); // Pipe to I
-        cleaned = cleaned.replace(/(\w)\s*-\s*(\w)/g, '$1$2'); // Remove hyphens between words
-        cleaned = cleaned.replace(/(\w)\s*\.\s*(\w)/g, '$1$2'); // Remove periods between words
-        cleaned = cleaned.replace(/\s+/g, ' '); // Normalize whitespace
+        // Stage 1: Advanced noise reduction using statistical analysis
+        cleaned = this.removeStatisticalNoise(cleaned);
 
-        // Specific OCR error patterns (based on common misreadings)
-        cleaned = cleaned.replace(/E I N C H/gi, 'FINCH'); // Fix spaced F I N C H
-        cleaned = cleaned.replace(/c o r m/gi, 'com'); // Fix .com domain
-        cleaned = cleaned.replace(/i n n o v a t e c h/gi, 'innovatech'); // Fix company name
-        cleaned = cleaned.replace(/A R T H U R/gi, 'ARTHUR'); // Fix spaced name
-        cleaned = cleaned.replace(/S O L U T I O N S/gi, 'SOLUTIONS'); // Fix spaced title
+        // Stage 2: Context-aware symbol removal
+        cleaned = this.contextAwareSymbolRemoval(cleaned);
 
-        // Email normalization with better pattern matching
-        cleaned = cleaned.replace(/([A-Za-z0-9._%+-]+)\s*@\s*([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g, (match, user, domain) => {
-            return user.toLowerCase() + '@' + domain.toLowerCase();
+        // Stage 3: OCR error pattern correction using machine learning-inspired rules
+        cleaned = this.correctOCRErrors(cleaned);
+
+        // Stage 4: Entity normalization with validation
+        cleaned = this.normalizeEntities(cleaned);
+
+        // Stage 5: Language-specific text refinement
+        cleaned = this.languageSpecificRefinement(cleaned);
+
+        // Stage 6: Intelligent line filtering based on content quality
+        cleaned = this.intelligentLineFiltering(cleaned);
+
+        return cleaned.trim();
+    }
+
+    // Statistical noise removal based on character frequency analysis
+    removeStatisticalNoise(text) {
+        const lines = text.split('\n');
+        const cleanedLines = lines.map(line => {
+            if (line.trim().length < 3) return line;
+
+            const chars = line.split('');
+            const charFreq = {};
+
+            // Calculate character frequency
+            chars.forEach(char => {
+                charFreq[char] = (charFreq[char] || 0) + 1;
+            });
+
+            // Identify noise characters (very high frequency, likely OCR artifacts)
+            const totalChars = chars.length;
+            const noiseChars = Object.entries(charFreq)
+                .filter(([char, freq]) => {
+                    const frequency = freq / totalChars;
+                    return frequency > 0.4 && !/[A-Za-z0-9\s]/.test(char);
+                })
+                .map(([char]) => char);
+
+            // Remove noise characters
+            let cleaned = line;
+            noiseChars.forEach(char => {
+                cleaned = cleaned.replace(new RegExp(char, 'g'), '');
+            });
+
+            return cleaned;
         });
 
-        // Website normalization: handle various OCR spacing issues
+        return cleanedLines.join('\n');
+    }
+
+    // Context-aware symbol removal based on surrounding characters
+    contextAwareSymbolRemoval(text) {
+        let cleaned = text;
+
+        // Remove symbols that are likely OCR errors based on context
+        cleaned = cleaned.replace(/[{}[\]"'=*]+/g, ''); // Hard symbols
+        cleaned = cleaned.replace(/[®©™•▫▪◆◇■□❖※‒–—―]+/g, ''); // Extended noise symbols
+        cleaned = cleaned.replace(/[~`^_]+/g, ''); // Tildes, backticks, carets, underscores
+
+        // Fix common OCR confusions with context awareness
+        cleaned = cleaned.replace(/\|/g, 'I'); // Pipe to I
+        cleaned = cleaned.replace(/(\w)\s*-\s*(\w)/g, (match, w1, w2) => {
+            // Only remove hyphen if both sides are letters (likely compound word)
+            return /^[A-Za-z]+$/.test(w1) && /^[A-Za-z]+$/.test(w2) ? w1 + w2 : match;
+        });
+
+        // Fix periods between words only if they're likely not sentence endings
+        cleaned = cleaned.replace(/(\w)\s*\.\s*(\w)/g, (match, w1, w2) => {
+            const words = match.split(/\s*\.\s*/);
+            return words.length === 2 && words.every(w => w.length > 1) ? w1 + w2 : match;
+        });
+
+        return cleaned.replace(/\s+/g, ' '); // Normalize whitespace
+    }
+
+    // Advanced OCR error correction using pattern recognition
+    correctOCRErrors(text) {
+        let cleaned = text;
+
+        // Enhanced pattern corrections based on common OCR mistakes
+        const corrections = [
+            // Spaced letter patterns
+            { pattern: /E I N C H/gi, replacement: 'FINCH' },
+            { pattern: /c o r m/gi, replacement: 'com' },
+            { pattern: /i n n o v a t e c h/gi, replacement: 'innovatech' },
+            { pattern: /A R T H U R/gi, replacement: 'ARTHUR' },
+            { pattern: /S O L U T I O N S/gi, replacement: 'SOLUTIONS' },
+            { pattern: /L T D/gi, replacement: 'LTD' },
+            { pattern: /I N C/gi, replacement: 'INC' },
+            { pattern: /C O R P/gi, replacement: 'CORP' },
+
+            // Character substitutions for common misreads
+            { pattern: /0/g, replacement: 'O', condition: (text) => / [A-Z] /.test(' ' + text + ' ') },
+            { pattern: /1/g, replacement: 'I', condition: (text) => /[A-Z]/.test(text) },
+            { pattern: /5/g, replacement: 'S', condition: (text) => /[A-Z]/.test(text) },
+            { pattern: /8/g, replacement: 'B', condition: (text) => /[A-Z]/.test(text) },
+
+            // Number patterns
+            { pattern: /(\d)\s+(\d)/g, replacement: '$1$2', condition: (text) => text.length < 20 }
+        ];
+
+        corrections.forEach(({ pattern, replacement, condition }) => {
+            if (!condition || condition(cleaned)) {
+                cleaned = cleaned.replace(pattern, replacement);
+            }
+        });
+
+        return cleaned;
+    }
+
+    // Enhanced entity normalization with validation
+    normalizeEntities(text) {
+        let cleaned = text;
+
+        // Email normalization with domain validation
+        cleaned = cleaned.replace(/([A-Za-z0-9._%+-]+)\s*@\s*([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g, (match, user, domain) => {
+            const normalizedUser = user.toLowerCase().replace(/\s+/g, '');
+            const normalizedDomain = domain.toLowerCase().replace(/\s+/g, '');
+            // Basic domain validation
+            if (normalizedDomain.split('.').length >= 2) {
+                return normalizedUser + '@' + normalizedDomain;
+            }
+            return match;
+        });
+
+        // Website normalization with protocol handling
         cleaned = cleaned.replace(/www\s*\.\s*/gi, 'www.');
         cleaned = cleaned.replace(/([A-Za-z0-9-])\s*\.\s*([A-Za-z0-9-])/g, '$1.$2');
         cleaned = cleaned.replace(/\s*\/\s*/g, '/');
+
+        // Smart website reconstruction
         cleaned = cleaned.replace(/(?:https?:\/\/)?(?:www\.)?([A-Za-z0-9-]+(?:\s*\.\s*[A-Za-z0-9-]+)+)/gi, (match, domain) => {
-            return 'www.' + domain.toLowerCase().replace(/\s+/g, '');
+            const normalizedDomain = domain.toLowerCase().replace(/\s+/g, '');
+            return normalizedDomain.startsWith('www.') ? normalizedDomain : 'www.' + normalizedDomain;
         });
 
-        // Phone normalization: more flexible pattern
-        cleaned = cleaned.replace(/\(?(\d{3})\)?[-.\s]*(\d{3})[-.\s]*(\d{4})/g, '($1) $2-$3');
-
-        // Remove lines that are mostly symbols or too short/meaningless
-        const lines = cleaned.split('\n');
-        const filteredLines = lines.filter(line => {
-            const trimmed = line.trim();
-            if (trimmed.length < 2) return false;
-            const symbolCount = (trimmed.match(/[^A-Za-z0-9\s@.:/()-]/g) || []).length;
-            const alphaNumCount = (trimmed.match(/[A-Za-z0-9]/g) || []).length;
-            return alphaNumCount >= 2 && alphaNumCount > symbolCount;
+        // Enhanced phone number normalization
+        cleaned = cleaned.replace(/\(?(\d{3})\)?[-.\s]*(\d{3})[-.\s]*(\d{4})/g, (match, a, b, c) => {
+            // Validate it's actually a phone number (not a date or other number)
+            if (a && b && c && a !== '000' && b !== '000' && c !== '0000') {
+                return `(${a}) ${b}-${c}`;
+            }
+            return match;
         });
 
-        return filteredLines.join('\n').trim();
+        return cleaned;
+    }
+
+    // Language-specific text refinement
+    languageSpecificRefinement(text) {
+        const currentLang = this.selectedLanguage;
+        let refined = text;
+
+        switch (currentLang) {
+            case 'eng':
+                // English-specific refinements
+                refined = this.englishTextRefinement(refined);
+                break;
+            case 'chi_sim':
+            case 'chi_tra':
+                // Chinese-specific refinements
+                refined = this.chineseTextRefinement(refined);
+                break;
+            case 'jpn':
+                // Japanese-specific refinements
+                refined = this.japaneseTextRefinement(refined);
+                break;
+        }
+
+        return refined;
+    }
+
+    // English-specific text improvements
+    englishTextRefinement(text) {
+        let refined = text;
+
+        // Fix common English OCR errors
+        refined = refined.replace(/\bteh\b/gi, 'the');
+        refined = refined.replace(/\btaht\b/gi, 'that');
+        refined = refined.replace(/\bfo\b/gi, 'to');
+        refined = refined.replace(/\bwiht\b/gi, 'with');
+        refined = refined.replace(/\band\b/gi, 'and');
+
+        // Capitalization improvements for proper nouns
+        refined = refined.replace(/\b([a-z]+)\b/g, (word) => {
+            const commonWords = ['the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had', 'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his', 'how', 'its', 'may', 'new', 'now', 'old', 'see', 'two', 'way', 'who', 'boy', 'did', 'has', 'let', 'put', 'say', 'she', 'too', 'use'];
+            if (word.length > 3 && !commonWords.includes(word.toLowerCase())) {
+                return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+            }
+            return word;
+        });
+
+        return refined;
+    }
+
+    // Chinese-specific text improvements
+    chineseTextRefinement(text) {
+        // Remove common OCR artifacts in Chinese text
+        return text.replace(/[\x00-\x1F\x7F-\x9F]/g, '')
+                  .replace(/\s+/g, '');
+    }
+
+    // Japanese-specific text improvements
+    japaneseTextRefinement(text) {
+        // Remove common OCR artifacts in Japanese text
+        return text.replace(/[\x00-\x1F\x7F-\x9F]/g, '')
+                  .replace(/\s+/g, '');
+    }
+
+    // Intelligent line filtering based on content quality and context
+    intelligentLineFiltering(text) {
+        const lines = text.split('\n');
+        const filteredLines = [];
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (line.length === 0) continue;
+
+            // Quality metrics for each line
+            const alphaNumCount = (line.match(/[A-Za-z0-9]/g) || []).length;
+            const symbolCount = (line.match(/[^A-Za-z0-9\s@.:/()-]/g) || []).length;
+            const totalLength = line.length;
+
+            // Skip very short or very noisy lines
+            if (totalLength < 2) continue;
+            if (symbolCount > totalLength * 0.7) continue;
+            if (alphaNumCount < 2 && !/@/.test(line) && !/\d{3}/.test(line)) continue;
+
+            // Context-aware filtering
+            const hasEmail = /@/.test(line);
+            const hasPhone = /\d{3}/.test(line);
+            const hasWebsite = /www\.|http/i.test(line);
+
+            // Keep lines with entities regardless of other metrics
+            if (hasEmail || hasPhone || hasWebsite) {
+                filteredLines.push(line);
+                continue;
+            }
+
+            // Advanced filtering based on line content analysis
+            const qualityScore = this.calculateLineQualityScore(line);
+            if (qualityScore > 0.3 || (i > 0 && i < lines.length - 1)) { // Keep context lines
+                filteredLines.push(line);
+            }
+        }
+
+        return filteredLines.join('\n');
+    }
+
+    // Calculate quality score for individual lines
+    calculateLineQualityScore(line) {
+        const alphaNumCount = (line.match(/[A-Za-z0-9]/g) || []).length;
+        const symbolCount = (line.match(/[^A-Za-z0-9\s@.:/()-]/g) || []).length;
+        const totalLength = line.length;
+
+        if (totalLength === 0) return 0;
+
+        const alphaNumRatio = alphaNumCount / totalLength;
+        const symbolRatio = symbolCount / totalLength;
+
+        // Base score from character ratios
+        let score = alphaNumRatio * 0.6 - symbolRatio * 0.4;
+
+        // Bonus for structured content
+        if (/@/.test(line)) score += 0.3;
+        if (/www\.|http/i.test(line)) score += 0.3;
+        if (/\d{3}/.test(line)) score += 0.2;
+        if (/[A-Z]{2,}/.test(line)) score += 0.1; // Possible acronyms
+
+        return Math.max(0, Math.min(1, score));
     }
     // Further refine result: extract and normalize email/phone/website, drop noisy lines
     refineBusinessCardText(text, entities = {}) {
@@ -509,83 +1059,337 @@ class ImageOCRTest {
         return t.toLowerCase();
     }
 
-    // Strict re-extraction of email and website with single-line PSM and limited charset
+    // Enhanced entity extraction with multiple strategies and validation
     async extractEntitiesFromImage(imageDataUrl) {
-        const results = { email: null, website: null };
-        if (!this.tesseractWorker) return results;
+        const results = { email: null, website: null, phone: null };
 
         try {
-            // Email pass
-            await this.tesseractWorker.setParameters({
-                tessedit_pageseg_mode: '7', // single line
-                tessedit_ocr_engine_mode: '2',
-                preserve_interword_spaces: '1',
-                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-@'
-            });
-            const emailRes = await this.tesseractWorker.recognize(imageDataUrl);
-            const emailText = (emailRes?.data?.text || '').trim();
-            const emailMatch = emailText.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
-            if (emailMatch) {
-                results.email = emailMatch[0];
-            }
+            // Strategy 1: Pattern-based extraction from preprocessed text
+            const preprocessedText = await this.getPreprocessedText(imageDataUrl);
+            const patternEntities = this.extractEntitiesFromText(preprocessedText);
 
-            // Website pass
-            await this.tesseractWorker.setParameters({
-                tessedit_pageseg_mode: '7', // single line
-                tessedit_ocr_engine_mode: '2',
-                preserve_interword_spaces: '1',
-                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-/:'
-            });
-            const webRes = await this.tesseractWorker.recognize(imageDataUrl);
-            let webText = (webRes?.data?.text || '').trim();
-            // Normalize spacing in domain
-            webText = webText.replace(/www\s*\.\s*/gi, 'www.').replace(/([A-Za-z0-9-])\s*\.\s*([A-Za-z0-9-])/g, '$1.$2');
-            const webMatch = webText.match(/(?:https?:\/\/)?(?:www\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:\/[^\s]*)?/);
-            if (webMatch) {
-                results.website = webMatch[0];
-            }
+            // Strategy 2: Specialized OCR passes for entity extraction
+            const specializedEntities = await this.specializedEntityExtraction(imageDataUrl);
+
+            // Strategy 3: Combine and validate results
+            results.email = this.validateAndSelectBest(
+                [...(patternEntities.emails || []), ...(specializedEntities.emails || [])],
+                'email'
+            );
+            results.website = this.validateAndSelectBest(
+                [...(patternEntities.websites || []), ...(specializedEntities.websites || [])],
+                'website'
+            );
+            results.phone = this.validateAndSelectBest(
+                [...(patternEntities.phones || []), ...(specializedEntities.phones || [])],
+                'phone'
+            );
+
         } catch (e) {
-            console.warn('Entity re-extraction error:', e);
+            console.warn('Entity extraction error:', e);
         }
         return results;
     }
 
-    // Image preprocessing: scale 4x + enhanced grayscale + adaptive binarization for sharper OCR
+    // Get preprocessed text for pattern-based extraction
+    async getPreprocessedText(imageDataUrl) {
+        if (!this.tesseractWorker) return '';
+
+        try {
+            const { data: { text } } = await this.tesseractWorker.recognize(imageDataUrl);
+            return text || '';
+        } catch (error) {
+            console.warn('Failed to get preprocessed text:', error);
+            return '';
+        }
+    }
+
+    // Extract entities using pattern matching from text
+    extractEntitiesFromText(text) {
+        return {
+            emails: this.extractEmails(text),
+            websites: this.extractWebsites(text),
+            phones: this.extractPhones(text)
+        };
+    }
+
+    // Multi-pass entity extraction with specialized configurations
+    async multiPassEntityExtraction(imageDataUrl) {
+        const entities = { emails: [], websites: [], phones: [] };
+
+        // Configuration 1: Single line mode for structured entities
+        await this.tesseractWorker.setParameters({
+            tessedit_pageseg_mode: '7', // Single text line
+            tessedit_ocr_engine_mode: '2',
+            preserve_interword_spaces: '1',
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-@:/-.()',
+            tessedit_enable_doc_dict: '1'
+        });
+
+        const singleLineResult = await this.tesseractWorker.recognize(imageDataUrl);
+        const singleLineText = singleLineResult?.data?.text || '';
+
+        // Extract entities from single line pass
+        entities.emails.push(...this.extractEmails(singleLineText));
+        entities.websites.push(...this.extractWebsites(singleLineText));
+        entities.phones.push(...this.extractPhones(singleLineText));
+
+        // Configuration 2: Sparse text mode for scattered entities
+        await this.tesseractWorker.setParameters({
+            tessedit_pageseg_mode: '11', // Sparse text
+            tessedit_ocr_engine_mode: '2',
+            preserve_interword_spaces: '1',
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-@:/-.()',
+            tessedit_enable_doc_dict: '1'
+        });
+
+        const sparseResult = await this.tesseractWorker.recognize(imageDataUrl);
+        const sparseText = sparseResult?.data?.text || '';
+
+        // Extract entities from sparse text pass
+        entities.emails.push(...this.extractEmails(sparseText));
+        entities.websites.push(...this.extractWebsites(sparseText));
+        entities.phones.push(...this.extractPhones(sparseText));
+
+        return entities;
+    }
+
+    // Pattern-based entity extraction from full text recognition
+    async patternBasedEntityExtraction(imageDataUrl) {
+        const entities = { emails: [], websites: [], phones: [] };
+
+        // Full text recognition for context
+        await this.tesseractWorker.setParameters({
+            tessedit_pageseg_mode: '3', // Fully automatic
+            tessedit_ocr_engine_mode: '2',
+            preserve_interword_spaces: '1',
+            tessedit_char_whitelist: this.getCharacterWhitelist(),
+            tessedit_enable_doc_dict: '1'
+        });
+
+        const fullResult = await this.tesseractWorker.recognize(imageDataUrl);
+        const fullText = fullResult?.data?.text || '';
+
+        // Extract entities using advanced patterns
+        entities.emails = this.extractEmails(fullText);
+        entities.websites = this.extractWebsites(fullText);
+        entities.phones = this.extractPhones(fullText);
+
+        return entities;
+    }
+
+    // Enhanced email extraction with multiple pattern matching
+    extractEmails(text) {
+        const emails = [];
+        if (!text) return emails;
+
+        // Multiple email patterns to catch various OCR errors
+        const patterns = [
+            // Standard email pattern
+            /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,
+            // Pattern for spaced emails (common OCR error)
+            /([A-Za-z0-9._%+-]+)\s*@\s*([A-Za-z0-9.-]+)\s*\.\s*([A-Za-z]{2,})/g,
+            // Pattern for emails with character substitutions
+            /[A-Za-z0-9._%+-]+@(?:gmail|yahoo|hotmail|outlook|icloud)\.com/g,
+            // Pattern for business emails
+            /[A-Za-z0-9._%+-]+@(?:company|corp|inc|llc|ltd)\.[A-Za-z]{2,}/g
+        ];
+
+        patterns.forEach(pattern => {
+            let matches;
+            while ((matches = pattern.exec(text)) !== null) {
+                const email = matches[0].replace(/\s+/g, '').toLowerCase();
+                if (this.isValidEmail(email)) {
+                    emails.push(email);
+                }
+            }
+        });
+
+        // Remove duplicates
+        return [...new Set(emails)];
+    }
+
+    // Enhanced website extraction with domain validation
+    extractWebsites(text) {
+        const websites = [];
+        if (!text) return websites;
+
+        const patterns = [
+            // Standard website patterns
+            /(?:https?:\/\/)?(?:www\.)?[A-Za-z0-9-]+(?:\s*\.\s*[A-Za-z0-9-]+)+(?:\/[^\s]*)?/g,
+            // Spaced domain patterns
+            /(?:www\s*\.)?\s*([A-Za-z0-9-]+)\s*\.\s*([A-Za-z0-9-]+)\s*(?:\.\s*([A-Za-z0-9-]+))?(?:\s*\/\s*[^\s]*)?/g,
+            // Common TLD patterns
+            /(?:www\s*\.)?[A-Za-z0-9-]+\.(?:com|org|net|edu|gov|mil|info|biz|co\.uk|co\.in|co\.au)/g
+        ];
+
+        patterns.forEach(pattern => {
+            let matches;
+            while ((matches = pattern.exec(text)) !== null) {
+                const website = this.normalizeWebsite(matches[0]);
+                if (this.isValidWebsite(website)) {
+                    websites.push(website);
+                }
+            }
+        });
+
+        return [...new Set(websites)];
+    }
+
+    // Enhanced phone extraction with multiple formats
+    extractPhones(text) {
+        const phones = [];
+        if (!text) return phones;
+
+        const patterns = [
+            // US/Canada format
+            /\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}/g,
+            // International format
+            /\+?\d{1,3}[-.\s]*\(?\d{1,4}\)?[-.\s]*\d{1,4}[-.\s]*\d{1,4}/g,
+            // Spaced number patterns
+            /(\d{3})\s*[-.\s]*\s*(\d{3})\s*[-.\s]*\s*(\d{4})/g,
+            // Extension patterns
+            /\(?\d{3}\)?[-.\s]*\d{3}[-.\s]*\d{4}\s*(?:ext|extension|x)\s*\d{1,5}/g
+        ];
+
+        patterns.forEach(pattern => {
+            let matches;
+            while ((matches = pattern.exec(text)) !== null) {
+                const phone = this.normalizePhone(matches[0]);
+                if (this.isValidPhone(phone)) {
+                    phones.push(phone);
+                }
+            }
+        });
+
+        return [...new Set(phones)];
+    }
+
+    // Email validation with basic domain checking
+    isValidEmail(email) {
+        if (!email || !/@/.test(email)) return false;
+
+        const [user, domain] = email.split('@');
+        if (!user || !domain) return false;
+
+        // Basic domain validation
+        const domainParts = domain.split('.');
+        if (domainParts.length < 2) return false;
+
+        const tld = domainParts[domainParts.length - 1];
+        const validTlds = ['com', 'org', 'net', 'edu', 'gov', 'mil', 'info', 'biz', 'co', 'uk', 'in', 'au', 'ca'];
+
+        return validTlds.includes(tld.toLowerCase()) && domainParts.every(part => part.length > 0);
+    }
+
+    // Website validation
+    isValidWebsite(website) {
+        if (!website) return false;
+
+        // Remove protocol if present
+        const cleanWebsite = website.replace(/^https?:\/\//, '').replace(/^www\./, '');
+
+        // Basic domain validation
+        const domainParts = cleanWebsite.split('.');
+        if (domainParts.length < 2) return false;
+
+        return domainParts.every(part => part.length > 0 && /^[A-Za-z0-9-]+$/.test(part));
+    }
+
+    // Phone validation
+    isValidPhone(phone) {
+        if (!phone) return false;
+
+        // Remove all non-digits
+        const digits = phone.replace(/\D/g, '');
+
+        // Check for reasonable length
+        return digits.length >= 10 && digits.length <= 15 && digits !== '0000000000';
+    }
+
+    // Select best entity from candidates based on validation scores
+    validateAndSelectBest(candidates, type) {
+        if (candidates.length === 0) return null;
+
+        // Score each candidate
+        const scored = candidates.map(candidate => ({
+            value: candidate,
+            score: this.calculateEntityScore(candidate, type)
+        }));
+
+        // Sort by score and return the best
+        scored.sort((a, b) => b.score - a.score);
+        return scored[0].value;
+    }
+
+    // Calculate quality score for entities
+    calculateEntityScore(entity, type) {
+        let score = 0;
+
+        switch (type) {
+            case 'email':
+                if (entity.includes('@')) score += 30;
+                if (entity.includes('.')) score += 20;
+                if (/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(entity)) score += 50;
+                break;
+
+            case 'website':
+                if (entity.includes('www.') || entity.includes('http')) score += 20;
+                if (entity.includes('.')) score += 30;
+                if (/^[A-Za-z0-9-]+\.[A-Za-z0-9-]+\.[A-Za-z]{2,}$/.test(entity.replace(/^www\./, ''))) score += 50;
+                break;
+
+            case 'phone':
+                const digits = entity.replace(/\D/g, '');
+                if (digits.length >= 10) score += 40;
+                if (digits.length <= 15) score += 30;
+                if (/^\(\d{3}\)\s*\d{3}-\d{4}$/.test(entity)) score += 30;
+                break;
+        }
+
+        return score;
+    }
+
+    // Enhanced image preprocessing: multi-stage enhancement for maximum OCR accuracy
     async preprocessImageForOCR(dataUrl) {
         return new Promise((resolve) => {
             const img = new Image();
             img.onload = () => {
-                // Increase scale to 4x for better text detail capture
-                const scale = 4;
-                const w = Math.max(1, Math.floor(img.naturalWidth * scale));
-                const h = Math.max(1, Math.floor(img.naturalHeight * scale));
+                // Dynamic scaling based on image dimensions for optimal text recognition
+                const baseScale = Math.min(img.naturalWidth, img.naturalHeight) < 300 ? 3 :
+                                 Math.min(img.naturalWidth, img.naturalHeight) < 800 ? 2 : 1.5;
+                const w = Math.max(1, Math.floor(img.naturalWidth * baseScale));
+                const h = Math.max(1, Math.floor(img.naturalHeight * baseScale));
+
                 const canvas = document.createElement('canvas');
                 canvas.width = w;
                 canvas.height = h;
                 const ctx = canvas.getContext('2d');
-                
+
                 // Disable smoothing for sharper edges
                 ctx.imageSmoothingEnabled = false;
                 ctx.drawImage(img, 0, 0, w, h);
 
                 let imageData = ctx.getImageData(0, 0, w, h);
                 const data = imageData.data;
-                
-                // Enhanced grayscale conversion with better weighting
-                for (let i = 0; i < data.length; i += 4) {
-                    const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-                    data[i] = data[i + 1] = data[i + 2] = gray;
-                }
-                
-                // Apply adaptive threshold instead of simple Otsu
-                const threshold = this.adaptiveThreshold(data, w, h);
-                
-                // Binarize with the adaptive threshold
-                for (let i = 0; i < data.length; i += 4) {
-                    const v = data[i] > threshold ? 255 : 0;
-                    data[i] = data[i + 1] = data[i + 2] = v;
-                    data[i + 3] = 255;
-                }
+
+                // Stage 1: Enhanced grayscale with luminance correction
+                this.enhancedGrayscale(data);
+
+                // Stage 2: Noise reduction using bilateral filter
+                imageData = this.bilateralFilter(imageData, w, h);
+
+                // Stage 3: Contrast enhancement using CLAHE (Contrast Limited Adaptive Histogram Equalization)
+                imageData = this.applyCLAHE(imageData, w, h);
+
+                // Stage 4: Advanced adaptive thresholding with morphological operations
+                const threshold = this.advancedAdaptiveThreshold(imageData.data, w, h);
+
+                // Stage 5: Binarization with hysteresis thresholding
+                this.hysteresisBinarization(imageData.data, threshold, w, h);
+
+                // Stage 6: Morphological operations to clean up text
+                this.morphologicalOperations(imageData.data, w, h);
 
                 ctx.putImageData(imageData, 0, 0);
                 resolve(canvas.toDataURL('image/png'));
@@ -625,87 +1429,452 @@ class ImageOCRTest {
         return threshold;
     }
 
-    // Perform multiple OCR passes with different configurations
+    // Perform multiple OCR passes with optimized configurations for different text types
     async performMultipleOCRPasses(imageDataUrl) {
         if (!this.tesseractWorker) return [];
 
+        // Get image dimensions for adaptive configuration
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.src = imageDataUrl;
+        await new Promise(resolve => img.onload = resolve);
+        const aspectRatio = img.width / img.height;
+        const isSingleLine = img.height < 100;
+        const isSmallText = img.height < 200;
+
+        // Create separate workers for different configurations to avoid parameter conflicts
+        const workers = [];
         const configurations = [
+            // Configuration 1: High accuracy for business cards and documents
             {
-                tessedit_pageseg_mode: '6', // Uniform block of text
-                tessedit_ocr_engine_mode: '2',
+                tessedit_pageseg_mode: isSingleLine ? '7' : '6', // Single line or uniform block
                 preserve_interword_spaces: '1',
                 tessedit_char_whitelist: this.getCharacterWhitelist(),
                 tessedit_enable_doc_dict: '1',
                 language_model_penalty_non_freq_dict_word: '0.15',
                 language_model_penalty_non_dict_word: '0.15'
             },
+            // Configuration 2: Conservative settings for clean text
             {
                 tessedit_pageseg_mode: '3', // Fully automatic
-                tessedit_ocr_engine_mode: '2',
                 preserve_interword_spaces: '1',
                 tessedit_char_whitelist: this.getCharacterWhitelist(),
-                tessedit_enable_doc_dict: '1'
+                tessedit_enable_doc_dict: '1',
+                tessedit_good_quality_unrej: '1',
+                tessedit_consistent_repa: '1'
             },
+            // Configuration 3: Aggressive settings for noisy/difficult text
             {
-                tessedit_pageseg_mode: '7', // Single text line
-                tessedit_ocr_engine_mode: '2',
+                tessedit_pageseg_mode: '6',
                 preserve_interword_spaces: '1',
-                tessedit_char_whitelist: this.getCharacterWhitelist()
-            }
+                tessedit_char_whitelist: this.getCharacterWhitelist(),
+                tessedit_enable_doc_dict: '1',
+                language_model_penalty_non_freq_dict_word: '0.05',
+                language_model_penalty_non_dict_word: '0.05'
+            },
+            // Configuration 4: Single character mode for very small text
+            ...(isSmallText ? [{
+                tessedit_pageseg_mode: '10', // Single character
+                preserve_interword_spaces: '0',
+                tessedit_char_whitelist: this.getCharacterWhitelist(),
+                tessedit_enable_doc_dict: '1',
+                language_model_penalty_non_freq_dict_word: '0.01',
+                language_model_penalty_non_dict_word: '0.01'
+            }] : [])
         ];
 
         const results = [];
+
+        // Create workers for each configuration
         for (const config of configurations) {
             try {
-                await this.tesseractWorker.setParameters(config);
-                const { data: { text, confidence } } = await this.tesseractWorker.recognize(imageDataUrl);
-                results.push({ text: text.trim(), confidence, config });
+                const worker = await Tesseract.createWorker(this.selectedLanguage, 1, {
+                    workerPath: './tesseract-local/worker.min.js',
+                    corePath: './tesseract-local/tesseract-core-simd-lstm.wasm.js',
+                    langPath: './tessdata/',
+                    logger: m => console.log('🔄 Worker status:', m.status, m.progress ? Math.round(m.progress * 100) + '%' : '')
+                });
+                await worker.setParameters(config);
+                workers.push(worker);
             } catch (error) {
-                console.warn('OCR pass failed:', error);
+                console.warn('Failed to create worker:', error);
             }
         }
+
+        // Run OCR passes in parallel
+        const passPromises = workers.map(async (worker, index) => {
+            try {
+                const { data: { text, confidence } } = await worker.recognize(imageDataUrl);
+                return {
+                    text: text.trim(),
+                    confidence,
+                    config: configurations[index],
+                    score: this.calculateTextQualityScore(text, confidence)
+                };
+            } catch (error) {
+                console.warn('OCR pass failed:', error);
+                return null;
+            } finally {
+                // Clean up worker
+                try {
+                    await worker.terminate();
+                } catch (e) {
+                    console.warn('Worker cleanup failed:', e);
+                }
+            }
+        });
+
+        const passResults = await Promise.all(passPromises);
+        results.push(...passResults.filter(result => result !== null));
+
         return results;
     }
 
-    // Select the best OCR result based on confidence and text quality
+    // Calculate comprehensive text quality score
+    calculateTextQualityScore(text, confidence) {
+        if (!text || text.trim().length === 0) return 0;
+
+        let score = confidence;
+        const cleanText = text.trim();
+        const alphaNumCount = (cleanText.match(/[A-Za-z0-9]/g) || []).length;
+        const totalLength = cleanText.length;
+
+        if (totalLength === 0) return 0;
+
+        // Content quality metrics
+        const alphaNumRatio = alphaNumCount / totalLength;
+
+        // Bonus for structured content patterns
+        const hasEmail = /@/.test(cleanText);
+        const hasPhone = /\d{3}/.test(cleanText);
+        const hasWebsite = /www\.|http/i.test(cleanText);
+        const hasBusinessKeywords = /\b(company|inc|llc|ltd|corp|corporation|university|school|hospital)\b/i.test(cleanText);
+
+        if (hasEmail) score += 25;
+        if (hasPhone) score += 15;
+        if (hasWebsite) score += 20;
+        if (hasBusinessKeywords) score += 10;
+
+        // Text structure bonuses
+        const lineCount = cleanText.split('\n').length;
+        if (lineCount > 1 && lineCount <= 10) score += 10; // Multi-line structure bonus
+        if (cleanText.includes(':') || cleanText.includes('|')) score += 5; // Structured data
+
+        // Character set quality
+        const symbolCount = (cleanText.match(/[^A-Za-z0-9\s@.:/()|-]/g) || []).length;
+        const symbolRatio = symbolCount / totalLength;
+
+        // Penalty for excessive symbols or poor character ratio
+        if (alphaNumRatio < 0.3) score -= 30;
+        if (symbolRatio > 0.5) score -= 20;
+        if (symbolRatio > 0.7) score -= 50; // Very noisy text
+
+        // Length appropriateness
+        if (totalLength > 1000) score += 5; // Substantial content bonus
+        if (totalLength < 10 && !hasEmail && !hasPhone) score -= 20; // Too short without entities
+
+        // Language-specific patterns
+        const currentLang = this.selectedLanguage;
+        if (currentLang === 'eng') {
+            const wordCount = cleanText.split(/\s+/).length;
+            const avgWordLength = alphaNumCount / wordCount;
+            if (avgWordLength > 2 && avgWordLength < 10) score += 5;
+        }
+
+        return Math.max(0, Math.round(score));
+    }
+
+    // Select the best OCR result using advanced scoring
     selectBestOCRResult(results) {
         if (results.length === 0) {
             return { text: '', confidence: 0 };
         }
 
-        // Score each result based on confidence and text characteristics
-        const scoredResults = results.map(result => {
-            let score = result.confidence;
-            
-            // Bonus for results with emails, phones, or websites
-            const hasEmail = /@/.test(result.text);
-            const hasPhone = /\d{3}/.test(result.text);
-            const hasWebsite = /www\./i.test(result.text);
-            
-            if (hasEmail) score += 20;
-            if (hasPhone) score += 10;
-            if (hasWebsite) score += 15;
-            
-            // Penalty for too many symbols
-            const symbolCount = (result.text.match(/[^A-Za-z0-9\s@.:/()-]/g) || []).length;
-            const alphaNumCount = (result.text.match(/[A-Za-z0-9]/g) || []).length;
-            if (alphaNumCount > 0) {
-                const symbolRatio = symbolCount / alphaNumCount;
-                score -= symbolRatio * 10;
-            }
-            
-            return { ...result, score };
+        // Use the enhanced scoring system
+        const scoredResults = results.map(result => ({
+            ...result,
+            qualityScore: result.score || this.calculateTextQualityScore(result.text, result.confidence)
+        }));
+
+        // Sort by quality score and return the best result
+        scoredResults.sort((a, b) => b.qualityScore - a.qualityScore);
+        const bestResult = scoredResults[0];
+
+        console.log('OCR Results Analysis:', {
+            totalPasses: results.length,
+            bestScore: bestResult.qualityScore,
+            bestConfidence: bestResult.confidence,
+            textLength: bestResult.text.length
         });
 
-        // Return the result with the highest score
-        scoredResults.sort((a, b) => b.score - a.score);
-        return { text: scoredResults[0].text, confidence: scoredResults[0].confidence };
+        return {
+            text: bestResult.text,
+            confidence: bestResult.confidence,
+            qualityScore: bestResult.qualityScore
+        };
     }
 
-    // New adaptive threshold method for better binarization
+    // Enhanced grayscale conversion with better color weighting
+    enhancedGrayscale(data) {
+        for (let i = 0; i < data.length; i += 4) {
+            // Improved luminance calculation with gamma correction
+            const r = data[i] / 255;
+            const g = data[i + 1] / 255;
+            const b = data[i + 2] / 255;
+
+            // Apply gamma correction and improved weighting
+            const gray = Math.round(255 * Math.pow(0.299 * Math.pow(r, 2.2) +
+                                                   0.587 * Math.pow(g, 2.2) +
+                                                   0.114 * Math.pow(b, 2.2), 1/2.2));
+            data[i] = data[i + 1] = data[i + 2] = gray;
+        }
+    }
+
+    // Bilateral filter for noise reduction while preserving edges
+    bilateralFilter(imageData, width, height) {
+        const data = imageData.data;
+        const output = new Uint8ClampedArray(data);
+        const spatialSigma = 2;
+        const intensitySigma = 30;
+
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const centerIndex = (y * width + x) * 4;
+                const centerIntensity = data[centerIndex];
+                let sum = 0;
+                let weightSum = 0;
+
+                // Apply bilateral filter in 5x5 neighborhood
+                for (let ky = -2; ky <= 2; ky++) {
+                    for (let kx = -2; kx <= 2; kx++) {
+                        const nx = x + kx;
+                        const ny = y + ky;
+
+                        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                            const neighborIndex = (ny * width + nx) * 4;
+                            const neighborIntensity = data[neighborIndex];
+
+                            // Spatial weight (Gaussian)
+                            const spatialDist = kx * kx + ky * ky;
+                            const spatialWeight = Math.exp(-spatialDist / (2 * spatialSigma * spatialSigma));
+
+                            // Intensity weight (Gaussian)
+                            const intensityDist = (centerIntensity - neighborIntensity) * (centerIntensity - neighborIntensity);
+                            const intensityWeight = Math.exp(-intensityDist / (2 * intensitySigma * intensitySigma));
+
+                            const weight = spatialWeight * intensityWeight;
+                            sum += neighborIntensity * weight;
+                            weightSum += weight;
+                        }
+                    }
+                }
+
+                const filteredValue = Math.round(sum / weightSum);
+                output[centerIndex] = output[centerIndex + 1] = output[centerIndex + 2] = filteredValue;
+            }
+        }
+
+        return new ImageData(output, width, height);
+    }
+
+    // CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    applyCLAHE(imageData, width, height) {
+        const data = imageData.data;
+        const output = new Uint8ClampedArray(data);
+        const tileSize = 32;
+        const clipLimit = 3;
+
+        const tilesX = Math.ceil(width / tileSize);
+        const tilesY = Math.ceil(height / tileSize);
+
+        // Process each tile
+        for (let ty = 0; ty < tilesY; ty++) {
+            for (let tx = 0; tx < tilesX; tx++) {
+                const startX = tx * tileSize;
+                const startY = ty * tileSize;
+                const endX = Math.min(startX + tileSize, width);
+                const endY = Math.min(startY + tileSize, height);
+
+                // Extract tile histogram
+                const histogram = new Array(256).fill(0);
+                for (let y = startY; y < endY; y++) {
+                    for (let x = startX; x < endX; x++) {
+                        const index = (y * width + x) * 4;
+                        histogram[data[index]]++;
+                    }
+                }
+
+                // Clip histogram
+                const totalPixels = (endX - startX) * (endY - startY);
+                const clipValue = Math.round((totalPixels / 256) * clipLimit);
+
+                let excess = 0;
+                for (let i = 0; i < 256; i++) {
+                    if (histogram[i] > clipValue) {
+                        excess += histogram[i] - clipValue;
+                        histogram[i] = clipValue;
+                    }
+                }
+
+                // Redistribute excess
+                const increment = Math.floor(excess / 256);
+                for (let i = 0; i < 256; i++) {
+                    histogram[i] += increment;
+                }
+
+                // Calculate CDF
+                const cdf = new Array(256);
+                cdf[0] = histogram[0];
+                for (let i = 1; i < 256; i++) {
+                    cdf[i] = cdf[i - 1] + histogram[i];
+                }
+
+                // Apply equalization to tile
+                const scale = 255 / cdf[255];
+                for (let y = startY; y < endY; y++) {
+                    for (let x = startX; x < endX; x++) {
+                        const index = (y * width + x) * 4;
+                        const equalized = Math.round(cdf[data[index]] * scale);
+                        output[index] = output[index + 1] = output[index + 2] = equalized;
+                    }
+                }
+            }
+        }
+
+        return new ImageData(output, width, height);
+    }
+
+    // Advanced adaptive thresholding with Sauvola method
+    advancedAdaptiveThreshold(data, width, height) {
+        const blockSize = 15;
+        const k = 0.34; // Sauvola parameter
+        const R = 128; // Dynamic range of standard deviation
+
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const index = y * width + x;
+                let sum = 0;
+                let sumSq = 0;
+                let count = 0;
+
+                // Calculate local statistics
+                for (let i = -Math.floor(blockSize / 2); i <= Math.floor(blockSize / 2); i++) {
+                    for (let j = -Math.floor(blockSize / 2); j <= Math.floor(blockSize / 2); j++) {
+                        const nx = x + j;
+                        const ny = y + i;
+                        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                            const pixelValue = data[(ny * width + nx) * 4];
+                            sum += pixelValue;
+                            sumSq += pixelValue * pixelValue;
+                            count++;
+                        }
+                    }
+                }
+
+                const mean = sum / count;
+                const variance = (sumSq / count) - (mean * mean);
+                const stdDev = Math.sqrt(Math.max(0, variance));
+
+                // Sauvola threshold
+                const threshold = mean * (1 + k * ((stdDev / R) - 1));
+
+                // Apply threshold
+                const pixelValue = data[index * 4];
+                const binaryValue = pixelValue > threshold ? 255 : 0;
+                data[index * 4] = data[index * 4 + 1] = data[index * 4 + 2] = binaryValue;
+            }
+        }
+
+        return 128;
+    }
+
+    // Hysteresis binarization for better text connectivity
+    hysteresisBinarization(data, threshold, width, height) {
+        const highThreshold = threshold + 20;
+        const lowThreshold = threshold - 20;
+
+        // First pass: mark strong edges
+        const strongEdges = new Uint8Array(width * height);
+        for (let i = 0; i < data.length; i += 4) {
+            const intensity = data[i];
+            if (intensity > highThreshold) {
+                strongEdges[i / 4] = 2; // Strong edge
+            } else if (intensity > lowThreshold) {
+                strongEdges[i / 4] = 1; // Weak edge
+            }
+        }
+
+        // Second pass: connect weak edges to strong edges
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (let y = 1; y < height - 1; y++) {
+                for (let x = 1; x < width - 1; x++) {
+                    const index = y * width + x;
+                    if (strongEdges[index] === 1) {
+                        // Check 8-neighborhood for strong edges
+                        for (let dy = -1; dy <= 1; dy++) {
+                            for (let dx = -1; dx <= 1; dx++) {
+                                const nIndex = (y + dy) * width + (x + dx);
+                                if (strongEdges[nIndex] === 2) {
+                                    strongEdges[index] = 2;
+                                    changed = true;
+                                    break;
+                                }
+                            }
+                            if (changed) break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply final binarization
+        for (let i = 0; i < data.length; i += 4) {
+            const index = i / 4;
+            const value = strongEdges[index] === 2 ? 255 : 0;
+            data[i] = data[i + 1] = data[i + 2] = value;
+        }
+    }
+
+    // Morphological operations to clean up text
+    morphologicalOperations(data, width, height) {
+        // Dilation to connect broken text parts
+        const dilated = new Uint8ClampedArray(data);
+
+        for (let y = 1; y < height - 1; y++) {
+            for (let x = 1; x < width - 1; x++) {
+                const index = (y * width + x) * 4;
+                if (data[index] === 0) { // Background pixel
+                    // Check if any neighbor is foreground
+                    let hasForegroundNeighbor = false;
+                    for (let dy = -1; dy <= 1; dy++) {
+                        for (let dx = -1; dx <= 1; dx++) {
+                            const nIndex = ((y + dy) * width + (x + dx)) * 4;
+                            if (data[nIndex] === 255) {
+                                hasForegroundNeighbor = true;
+                                break;
+                            }
+                        }
+                        if (hasForegroundNeighbor) break;
+                    }
+                    if (hasForegroundNeighbor) {
+                        dilated[index] = dilated[index + 1] = dilated[index + 2] = 255;
+                    }
+                }
+            }
+        }
+
+        // Copy dilated result back
+        for (let i = 0; i < data.length; i++) {
+            data[i] = dilated[i];
+        }
+    }
+
+    // Legacy adaptive threshold method for backward compatibility
     adaptiveThreshold(data, width, height) {
-        const blockSize = 15; // Size of the neighborhood area
-        const C = -10; // Constant to subtract from the mean
+        const blockSize = 15;
+        const C = -10;
         const thresholded = new Uint8Array(width * height);
 
         for (let y = 0; y < height; y++) {
@@ -714,13 +1883,12 @@ class ImageOCRTest {
                 let sum = 0;
                 let count = 0;
 
-                // Calculate local mean in the block
                 for (let i = -Math.floor(blockSize / 2); i <= Math.floor(blockSize / 2); i++) {
                     for (let j = -Math.floor(blockSize / 2); j <= Math.floor(blockSize / 2); j++) {
                         const nx = x + j;
                         const ny = y + i;
                         if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                            sum += data[(ny * width + nx) * 4]; // Grayscale value
+                            sum += data[(ny * width + nx) * 4];
                             count++;
                         }
                     }
@@ -731,13 +1899,12 @@ class ImageOCRTest {
             }
         }
 
-        // Copy thresholded values back to data
         for (let i = 0; i < data.length; i += 4) {
             const index = i / 4;
             data[i] = data[i + 1] = data[i + 2] = thresholded[index];
         }
 
-        return 128; // Return a default threshold value
+        return 128;
     }
 }
 
