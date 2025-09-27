@@ -322,3 +322,12 @@ body {
     grid-template-columns: 1fr 1fr;
   }
 }
+
+.language-info {
+   display: flex;
+   flex-direction: column;
+   gap: 0.5rem;
+   color: var(--text-secondary);
+   font-size: 0.875rem;
+   line-height: 1.4;
+}

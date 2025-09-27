@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Real-time Webcam OCR using Gemini 2.5 Flash models">
-    <title>Webcam OCR - Real-time Text Recognition</title>
+    <meta name="description" content="Real-time Webcam OCR using Tesseract.js - Mobile-responsive camera text recognition">
+    <title>Webcam OCR - Tesseract.js Text Recognition</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -41,21 +41,21 @@
                        <button id="startBtn" class="btn btn-primary">Start Camera</button>
                        <button id="stopBtn" class="btn btn-danger" disabled>Stop</button>
                    </div>
-                    <div class="control-group">
-                        <label for="modelSelect">AI Model</label>
-                        <select id="modelSelect">
-                            <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite (Fast)</option>
-                            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                        </select>
-                    </div>
 
-                    <div class="control-group">
-                        <label>Capture Mode</label>
-                        <div class="radio-group">
-                            <label><input type="radio" name="captureMode" value="interval"> Interval</label>
-                            <label><input type="radio" name="captureMode" value="async" checked> Async</label>
-                        </div>
-                    </div>
+                   <div class="control-group">
+                       <button id="captureBtn" class="btn btn-primary" disabled style="grid-column: span 2;">
+                           🔄 Start Auto Capture
+                       </button>
+                   </div>
+
+                   <div class="control-group">
+                       <label>Language Support</label>
+                       <div class="language-info">
+                           <small>English + 中文简体 (Chinese Simplified)</small>
+                           <br>
+                           <small>Click capture button to recognize text in camera view</small>
+                       </div>
+                   </div>
 
                 </div>
 
@@ -98,12 +98,11 @@
         </main>
 
         <!-- Footer -->
-        <footer class="app-footer">
-            <p>Real-time OCR System</p>
-        </footer>
-    </div>
+         <footer class="app-footer">
+             <p>Webcam OCR with Tesseract.js</p>
+         </footer>
+     </div>
 
-    <script src="gemini-config.js"></script>
-    <script src="script.js"></script>
+     <script src="script.js"></script>
 </body>
 </html>
