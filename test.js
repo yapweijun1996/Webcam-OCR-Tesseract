@@ -131,8 +131,9 @@ class ImageOCRTest {
             this.showProcessing(true);
             this.setStatus('Processing...', 'warning');
 
-            // Convert image file to data URL for Tesseract
-            const imageDataUrl = await this.fileToDataURL(this.selectedImageFile);
+            // Convert image file to data URL for Tesseract, then preprocess (scale + binarize)
+            const rawDataUrl = await this.fileToDataURL(this.selectedImageFile);
+            const imageDataUrl = await this.preprocessImageForOCR(rawDataUrl);
 
             this.setStatus('Recognizing text...', 'warning');
             console.log('OCR Language:', this.selectedLanguage); // Debug log
@@ -165,8 +166,10 @@ class ImageOCRTest {
 
             console.log('Raw OCR Result:', { text, confidence }); // Debug raw result
 
-            // Clean up the text result
-            const cleanedText = this.cleanOCRText(text);
+            // Clean up the text result + re-extract key entities from image with strict models
+            const baseClean = this.cleanOCRText(text);
+            const entities = await this.extractEntitiesFromImage(imageDataUrl);
+            const cleanedText = this.refineBusinessCardText(baseClean, entities);
 
             // Add result to history
             const result = {
@@ -323,7 +326,7 @@ class ImageOCRTest {
         // Return character whitelist based on selected language for better accuracy
         switch (this.selectedLanguage) {
             case 'eng':
-                return 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,!?-()@';
+                return 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,!?-()@_:+/';
             case 'chi_sim':
                 return '的一是在不了有和人了这上着个地到大里说去子得也起时来二点是两为道做种开见面天后前头同经发成向而多全三小口女白子四五目耳手文其业本民力此处求金长得色只关信间三小口女白子四五目耳手文其业本民力此处求金长得色只关信间';
             case 'jpn':
@@ -338,38 +341,241 @@ class ImageOCRTest {
     cleanOCRText(text) {
         if (!text) return '';
 
-        // Remove excessive special characters and symbols
-        let cleaned = text.replace(/[=(){}[\]"']/g, '');
+        // Remove excessive special characters and symbols (keep meaningful punctuation)
+        let cleaned = text
+            .replace(/[{}[\]"'=*]+/g, '')      // hard symbols
+            .replace(/[®©™•▫▪◆◇■□❖※‒–—―]+/g, '') // common noise from prints
+            .replace(/\|/g, 'I');               // common OCR confusions
 
-        // Fix common OCR mistakes
-        cleaned = cleaned.replace(/\|/g, 'I');
-        cleaned = cleaned.replace(/\*/g, '');
-        cleaned = cleaned.replace(/\+/g, '');
-        cleaned = cleaned.replace(/½/g, '');
-        cleaned = cleaned.replace(/¼/g, '');
+        // Remove stray punctuation around words
+        cleaned = cleaned.replace(/\s+[;:]+/g, ' ').replace(/[;:]+\s+/g, ' ');
 
-        // Fix email patterns
-        cleaned = cleaned.replace(/([a-zA-Z0-9_.+-]+)@([a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)/g, '$1@$2');
+        // Email normalization (keep exact pattern)
+        cleaned = cleaned.replace(/([A-Za-z0-9._%+-]+)\s*@\s*([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g, '$1@$2');
 
-        // Fix phone number patterns
+        // Website normalization: "www .example .com" -> "www.example.com"
+        cleaned = cleaned.replace(/www\s*\.\s*/gi, 'www.');
+        cleaned = cleaned.replace(/([A-Za-z0-9-])\s*\.\s*([A-Za-z0-9-])/g, '$1.$2');
+        cleaned = cleaned.replace(/\s*\/\s*/g, '/');
+
+        // Phone normalization: compress and pretty print if US-like
         cleaned = cleaned.replace(/\(?(\d{3})\)?[-.\s]*(\d{3})[-.\s]*(\d{4})/g, '($1) $2-$3');
 
-        // Remove standalone symbols but keep meaningful ones
-        cleaned = cleaned.replace(/\b[=:]+\b/g, '');
+        // Collapse whitespace but keep line breaks meaningful
+        cleaned = cleaned.replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n');
 
-        // Clean up extra whitespace
-        cleaned = cleaned.replace(/\s+/g, ' ');
-        cleaned = cleaned.replace(/\n+/g, '\n');
-
-        // Remove lines that are mostly symbols
+        // Remove lines that are mostly symbols or too short to be useful
         const lines = cleaned.split('\n');
         const filteredLines = lines.filter(line => {
-            const symbolCount = (line.match(/[^a-zA-Z0-9\s@.-]/g) || []).length;
-            const alphaNumCount = (line.match(/[a-zA-Z0-9]/g) || []).length;
-            return alphaNumCount > symbolCount || alphaNumCount > 2;
+            const symbolCount = (line.match(/[^A-Za-z0-9\s@.:/()-]/g) || []).length;
+            const alphaNumCount = (line.match(/[A-Za-z0-9]/g) || []).length;
+            return alphaNumCount >= 3 && alphaNumCount >= symbolCount;
         });
 
         return filteredLines.join('\n').trim();
+    }
+    // Further refine result: extract and normalize email/phone/website, drop noisy lines
+    refineBusinessCardText(text, entities = {}) {
+        if (!text) return '';
+
+        // Extract likely entities from initial text
+        let emailMatch = text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+        let phoneMatch = text.match(/(?:\+?\d[\d\s().-]{6,}\d)/);
+        let webMatch = text.match(/(?:https?:\/\/)?(?:www\.)?[A-Za-z0-9-]+(?:\s*\.\s*[A-Za-z0-9-]+)+(?:\/[^\s]*)?/);
+
+        // Prefer strictly re-extracted entities if available
+        if (entities.email) emailMatch = [entities.email];
+        if (entities.website) webMatch = [entities.website];
+
+        let lines = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+
+        // Stronger noise filtering
+        lines = lines.filter(line => {
+            const alnum = (line.match(/[A-Za-z0-9]/g) || []).length;
+            const symbols = (line.match(/[^A-Za-z0-9\s.@:/()-]/g) || []).length;
+            // require at least 4 alnum and symbols at most half of alnum
+            return alnum >= 4 && symbols <= Math.max(1, Math.floor(alnum / 2));
+        });
+
+        // Deduplicate case-insensitive
+        const seen = new Set();
+        lines = lines.filter(l => {
+            const key = l.toLowerCase().replace(/\s+/g, ' ');
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+
+        // Remove lines that look like leftover symbol noise
+        lines = lines.filter(l => !/^[\s.:;'"`~^_|\\\-–—]+$/.test(l));
+
+        // Inject canonical entities at the bottom (and remove worse duplicates)
+        if (emailMatch) {
+            const em = this.normalizeEmail(emailMatch[0]);
+            lines = lines.filter(l => !/@/.test(l));
+            lines.push(em);
+        }
+        if (phoneMatch) {
+            const ph = this.normalizePhone(phoneMatch[0]);
+            // remove any line that contains a 7+ sequence of digits mixed with separators
+            lines = lines.filter(l => !/\d[\d\s().-]{6,}\d/.test(l));
+            lines.push(ph);
+        }
+        if (webMatch) {
+            const wb = this.normalizeWebsite(webMatch[0]);
+            lines = lines.filter(l => !/(?:www|http)/i.test(l));
+            lines.push(wb);
+        }
+
+        // Final domain spacing normalization
+        lines = lines.map(l => l.replace(/([A-Za-z0-9-])\s*\.\s*([A-Za-z0-9-])/g, '$1.$2'));
+
+        return lines.join('\n').trim();
+    }
+
+    normalizeEmail(s) {
+        return s.replace(/\s+/g, '').toLowerCase();
+    }
+
+    normalizePhone(s) {
+        const digits = (s.match(/\d/g) || []).join('');
+        if (digits.length >= 10) {
+            const d = digits.slice(-10);
+            return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
+        }
+        return s.replace(/\s+/g, ' ').trim();
+    }
+
+    normalizeWebsite(s) {
+        let t = s.trim();
+        t = t.replace(/www\s*\.\s*/i, 'www.');
+        t = t.replace(/([A-Za-z0-9-])\s*\.\s*([A-Za-z0-9-])/g, '$1.$2');
+        t = t.replace(/\s*\/\s*/g, '/');
+        if (!/^https?:\/\//i.test(t) && !/^www\./i.test(t)) t = 'www.' + t;
+        return t.toLowerCase();
+    }
+
+    // Strict re-extraction of email and website with single-line PSM and limited charset
+    async extractEntitiesFromImage(imageDataUrl) {
+        const results = { email: null, website: null };
+        try {
+            // Email pass
+            const emailRes = await Tesseract.recognize(
+                imageDataUrl,
+                'eng',
+                {
+                    logger: () => {},
+                    tessedit_pageseg_mode: '7', // single line
+                    tessedit_ocr_engine_mode: '2',
+                    preserve_interword_spaces: '1',
+                    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-@'
+                }
+            );
+            const emailText = (emailRes?.data?.text || '').trim();
+            const emailMatch = emailText.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+            if (emailMatch) {
+                results.email = emailMatch[0];
+            }
+
+            // Website pass
+            const webRes = await Tesseract.recognize(
+                imageDataUrl,
+                'eng',
+                {
+                    logger: () => {},
+                    tessedit_pageseg_mode: '7', // single line
+                    tessedit_ocr_engine_mode: '2',
+                    preserve_interword_spaces: '1',
+                    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-/:'
+                }
+            );
+            let webText = (webRes?.data?.text || '').trim();
+            // Normalize spacing in domain
+            webText = webText.replace(/www\s*\.\s*/gi, 'www.').replace(/([A-Za-z0-9-])\s*\.\s*([A-Za-z0-9-])/g, '$1.$2');
+            const webMatch = webText.match(/(?:https?:\/\/)?(?:www\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?:\/[^\s]*)?/);
+            if (webMatch) {
+                results.website = webMatch[0];
+            }
+        } catch (e) {
+            console.warn('Entity re-extraction error:', e);
+        }
+        return results;
+    }
+
+    // Image preprocessing: scale 2x + grayscale + Otsu binarization for sharper OCR
+    async preprocessImageForOCR(dataUrl) {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+                const scale = 2;
+                const w = Math.max(1, Math.floor(img.naturalWidth * scale));
+                const h = Math.max(1, Math.floor(img.naturalHeight * scale));
+                const canvas = document.createElement('canvas');
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d');
+                ctx.imageSmoothingEnabled = true;
+                ctx.imageSmoothingQuality = 'high';
+                ctx.drawImage(img, 0, 0, w, h);
+
+                let imageData = ctx.getImageData(0, 0, w, h);
+                const data = imageData.data;
+                const gray = new Uint8Array(w * h);
+                const hist = new Uint32Array(256);
+
+                // Build grayscale + histogram
+                for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+                    const g = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+                    gray[j] = g;
+                    hist[g]++;
+                }
+
+                // Otsu threshold
+                const threshold = this.otsuThreshold(hist, w * h);
+
+                // Binarize
+                for (let i = 0, j = 0; i < data.length; i += 4, j++) {
+                    const v = gray[j] > threshold ? 255 : 0;
+                    data[i] = data[i + 1] = data[i + 2] = v;
+                    data[i + 3] = 255;
+                }
+
+                ctx.putImageData(imageData, 0, 0);
+                resolve(canvas.toDataURL('image/png'));
+            };
+            img.crossOrigin = 'anonymous';
+            img.src = dataUrl;
+        });
+    }
+
+    otsuThreshold(hist, total) {
+        let sum = 0;
+        for (let i = 0; i < 256; i++) sum += i * hist[i];
+
+        let sumB = 0;
+        let wB = 0;
+        let wF = 0;
+        let varMax = 0;
+        let threshold = 127;
+
+        for (let i = 0; i < 256; i++) {
+            wB += hist[i];
+            if (wB === 0) continue;
+            wF = total - wB;
+            if (wF === 0) break;
+
+            sumB += i * hist[i];
+
+            const mB = sumB / wB;
+            const mF = (sum - sumB) / wF;
+            const between = wB * wF * (mB - mF) * (mB - mF);
+
+            if (between > varMax) {
+                varMax = between;
+                threshold = i;
+            }
+        }
+        return threshold;
     }
 }
 
