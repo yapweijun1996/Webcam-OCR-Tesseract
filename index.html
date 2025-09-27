@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Real-time Webcam OCR using Gemini 2.5 Flash models">
+    <title>Webcam OCR - Real-time Text Recognition</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <h1>Webcam OCR</h1>
+            <div class="status-indicator" id="statusIndicator">
+                <span class="status-dot"></span>
+                <span class="status-text">Initializing...</span>
+            </div>
+            <div class="top-loader" id="topLoader"></div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Camera Section -->
+            <section class="camera-section">
+                <div class="camera-container">
+                    <video id="cameraFeed" autoplay playsinline muted></video>
+                    <canvas id="captureCanvas" style="display: none;"></canvas>
+                    <div class="camera-overlay" id="cameraOverlay">
+                        <div class="capture-indicator">
+                            <div class="capture-pulse"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Controls Section -->
+            <section class="controls-section">
+                <div class="control-grid">
+                   <div class="button-group">
+                       <button id="startBtn" class="btn btn-primary">Start Camera</button>
+                       <button id="stopBtn" class="btn btn-danger" disabled>Stop</button>
+                   </div>
+                    <div class="control-group">
+                        <label for="modelSelect">AI Model</label>
+                        <select id="modelSelect">
+                            <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite (Fast)</option>
+                            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                        </select>
+                    </div>
+
+                    <div class="control-group">
+                        <label>Capture Mode</label>
+                        <div class="radio-group">
+                            <label><input type="radio" name="captureMode" value="interval"> Interval</label>
+                            <label><input type="radio" name="captureMode" value="async" checked> Async</label>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- Debug Info (collapsible) -->
+                <details class="debug-info" id="debugInfo" style="display: none;">
+                    <summary>Debug Info</summary>
+                    <div class="debug-content">
+                        <p><strong>Browser:</strong> <span id="debugBrowser"></span></p>
+                        <p><strong>HTTPS:</strong> <span id="debugHttps"></span></p>
+                        <p><strong>Camera API:</strong> <span id="debugCameraAPI"></span></p>
+                        <p><strong>Stream Status:</strong> <span id="debugStream"></span></p>
+                        <p><strong>Video Dimensions:</strong> <span id="debugVideoSize"></span></p>
+                    </div>
+                </details>
+            </section>
+
+            <!-- Results Section -->
+            <section class="results-section">
+                <div class="results-header">
+                    <h2>OCR Results</h2>
+                    <button id="clearBtn" class="btn btn-outline">Clear</button>
+                </div>
+
+                <div class="results-container">
+                    <div id="resultsList" class="results-list">
+                        <!-- Results will be inserted here -->
+                    </div>
+
+                    <div id="errorMessage" class="error-message" style="display: none;">
+                        <p class="error-text"></p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Processing Indicator -->
+            <div id="processingIndicator" class="processing-indicator" style="display: none;">
+                <div class="spinner"></div>
+                <p>Processing...</p>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>Real-time OCR System</p>
+        </footer>
+    </div>
+
+    <script src="gemini-config.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
