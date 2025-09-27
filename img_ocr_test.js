@@ -30,35 +30,26 @@ class ImageOCRTest {
     }
 
     async initializeOCR() {
-        console.log('🚀 Starting OCR initialization...');
+        this.setStatus('Initializing OCR...', 'warning');
         try {
-            console.log('📋 Initializing Tesseract worker with local files...');
-            console.log('🔍 Language data path:', './tessdata/');
-            console.log('🔍 Language file expected:', `./tessdata/${this.selectedLanguage}.traineddata`);
-            this.setStatus('Initializing OCR...', 'warning');
-            this.tesseractWorker = await Tesseract.createWorker(this.selectedLanguage, 1, {
-                // Explicitly define local paths for offline use
+            this.tesseractWorker = await Tesseract.createWorker('eng+osd', 1, {
                 workerPath: './tesseract-local/worker.min.js',
                 corePath: './tesseract-local/tesseract-core-simd-lstm.wasm.js',
-                langPath: './tessdata/', // Use local language files
-                logger: m => {
-                    console.log('🔄 Tesseract status:', m.status, m.progress ? Math.round(m.progress * 100) + '%' : '');
-                    if (m.status === 'loading language traineddata') {
-                        console.log('📚 Language data loading progress:', Math.round(m.progress * 100) + '%');
-                        this.setStatus(`Loading ${this.selectedLanguage} model...`, 'warning');
-                    }
-                    if (m.status === 'initialized') {
-                        console.log('✅ Language data loaded successfully for:', this.selectedLanguage);
-                    }
-                },
+                // 👉 Point to tessdata_best for higher accuracy models
+                langPath: './tessdata_best/',
+                logger: m => console.log('[tesseract]', m),
             });
-            console.log('✅ Tesseract worker initialized successfully');
-            console.log('✅ Language data verified for:', this.selectedLanguage);
+            // Default parameters: LSTM-only + moderate penalties
+            await this.tesseractWorker.setParameters({
+                tessedit_ocr_engine_mode: '1', // LSTM only
+                preserve_interword_spaces: '1',
+                language_model_penalty_non_freq_dict_word: '0.15',
+                language_model_penalty_non_dict_word: '0.15',
+            });
             this.setStatus('OCR Ready', 'success');
         } catch (error) {
             console.error('❌ Failed to initialize Tesseract worker:', error);
-            console.error('❌ Language data error for:', this.selectedLanguage);
-            this.showError('Could not initialize the OCR engine. Please refresh the page.');
+            this.showError('Could not initialize OCR. Ensure "tessdata_best" directory exists and contains models.');
             this.setStatus('OCR Init Failed', 'error');
         }
     }
@@ -70,8 +61,9 @@ class ImageOCRTest {
         }
         try {
             this.setStatus(`Loading ${lang} model...`, 'warning');
-            await this.tesseractWorker.loadLanguage(lang);
-            await this.tesseractWorker.initialize(lang);
+            // Also load OSD for orientation detection with other languages
+            await this.tesseractWorker.loadLanguage(lang + '+osd');
+            await this.tesseractWorker.initialize(lang + '+osd');
             this.setStatus('Language model loaded', 'success');
         } catch (error) {
             console.error(`Failed to load language ${lang}:`, error);
@@ -188,8 +180,9 @@ class ImageOCRTest {
             this.showProcessing(true);
             this.setStatus('Processing...', 'warning');
 
-            // Convert image file to data URL for Tesseract, then preprocess (scale + binarize)
             const rawDataUrl = await this.fileToDataURL(this.selectedImageFile);
+
+            // Deskew image based on OSD, then preprocess for OCR
             const imageDataUrl = await this.preprocessImageForOCR(rawDataUrl);
 
             this.setStatus('Recognizing text...', 'warning');
@@ -216,11 +209,20 @@ class ImageOCRTest {
                 brightness: this.calculateImageBrightness()
             };
 
+            // Use processed image stats for accurate quality assessment
+            const processedStats = this._lastProcessed ?
+                this.calculateImageStatsFromCanvas(this._lastProcessed.canvas) : {};
+            const finalImageQuality = {
+                width: this._lastProcessed?.w || this.previewImage.naturalWidth,
+                height: this._lastProcessed?.h || this.previewImage.naturalHeight,
+                ...processedStats
+            };
+
             const comprehensiveConfidence = this.calculateComprehensiveConfidence(
                 { confidence },
                 cleanedText,
                 entities,
-                imageQuality
+                finalImageQuality
             );
 
             // Add result to history with enhanced confidence data
@@ -487,53 +489,47 @@ class ImageOCRTest {
         return Math.max(0, Math.min(100, score));
     }
 
-    // Specialized entity extraction using separate workers
+    // Specialized entity extraction with stricter parameters
     async specializedEntityExtraction(imageDataUrl) {
         const entities = { emails: [], websites: [], phones: [] };
+        if (!this.tesseractWorker) return entities;
 
         try {
-            // Email-specific extraction
-            const emailWorker = await Tesseract.createWorker(this.selectedLanguage, 1, {
-                workerPath: './tesseract-local/worker.min.js',
-                corePath: './tesseract-local/tesseract-core-simd-lstm.wasm.js',
-                langPath: './tessdata/'
+            // Email
+            await this.tesseractWorker.setParameters({
+                tessedit_pageseg_mode: '7', // Assume a single uniform block of text.
+                tessedit_ocr_engine_mode: '1', // LSTM only
+                preserve_interword_spaces: '1',
+                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-@'
             });
+            const emailRes = await this.tesseractWorker.recognize(imageDataUrl);
+            entities.emails = this.extractEmails(emailRes?.data?.text || '');
 
-            await emailWorker.setParameters({
+            // Website
+            await this.tesseractWorker.setParameters({
                 tessedit_pageseg_mode: '7',
-                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-@',
-                tessedit_enable_doc_dict: '1'
+                tessedit_ocr_engine_mode: '1',
+                preserve_interword_spaces: '1',
+                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-./:'
             });
+            const webRes = await this.tesseractWorker.recognize(imageDataUrl);
+            entities.websites = this.extractWebsites(webRes?.data?.text || '');
 
-            const emailResult = await emailWorker.recognize(imageDataUrl);
-            const emailText = emailResult?.data?.text || '';
-            entities.emails = this.extractEmails(emailText);
-
-            await emailWorker.terminate();
-
-            // Website-specific extraction
-            const websiteWorker = await Tesseract.createWorker(this.selectedLanguage, 1, {
-                workerPath: './tesseract-local/worker.min.js',
-                corePath: './tesseract-local/tesseract-core-simd-lstm.wasm.js',
-                langPath: './tessdata/'
-            });
-
-            await websiteWorker.setParameters({
+            // Phone (International)
+            await this.tesseractWorker.setParameters({
                 tessedit_pageseg_mode: '7',
-                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-/:',
-                tessedit_enable_doc_dict: '1'
+                tessedit_ocr_engine_mode: '1',
+                preserve_interword_spaces: '1',
+                tessedit_char_whitelist: '+()0123456789 -.'
             });
+            const phoneRes = await this.tesseractWorker.recognize(imageDataUrl);
+            entities.phones = this.extractPhones(phoneRes?.data?.text || '');
 
-            const websiteResult = await websiteWorker.recognize(imageDataUrl);
-            const websiteText = websiteResult?.data?.text || '';
-            entities.websites = this.extractWebsites(websiteText);
-
-            await websiteWorker.terminate();
-
-        } catch (error) {
-            console.warn('Specialized entity extraction failed:', error);
+        } catch (e) {
+            console.warn('specializedEntityExtraction failed', e);
+        } finally {
+            await this.resetTesseractParameters();
         }
-
         return entities;
     }
 
@@ -1350,52 +1346,70 @@ class ImageOCRTest {
         return score;
     }
 
-    // Enhanced image preprocessing: multi-stage enhancement for maximum OCR accuracy
+    // Enhanced image preprocessing: OSD deskew, scaling, sharpening, and advanced binarization
     async preprocessImageForOCR(dataUrl) {
-        return new Promise((resolve) => {
+        // First, correct orientation
+        const rotatedDataUrl = await this.osdDeskew(dataUrl);
+
+        return new Promise((resolve, reject) => {
             const img = new Image();
             img.onload = () => {
-                // Dynamic scaling based on image dimensions for optimal text recognition
-                const baseScale = Math.min(img.naturalWidth, img.naturalHeight) < 300 ? 3 :
-                                 Math.min(img.naturalWidth, img.naturalHeight) < 800 ? 2 : 1.5;
-                const w = Math.max(1, Math.floor(img.naturalWidth * baseScale));
-                const h = Math.max(1, Math.floor(img.naturalHeight * baseScale));
+                try {
+                    // --- Target x-height / DPI by scaling the short side ---
+                    const shortSide = Math.min(img.naturalWidth, img.naturalHeight);
+                    const scale = shortSide < 500 ? 4 : shortSide < 900 ? 2.5 : shortSide < 1400 ? 1.8 : 1.4;
+                    const w = Math.round(img.naturalWidth * scale);
+                    const h = Math.round(img.naturalHeight * scale);
 
-                const canvas = document.createElement('canvas');
-                canvas.width = w;
-                canvas.height = h;
-                const ctx = canvas.getContext('2d');
+                    const canvas = document.createElement('canvas');
+                    canvas.width = w;
+                    canvas.height = h;
+                    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                    ctx.imageSmoothingEnabled = false;
+                    ctx.drawImage(img, 0, 0, w, h);
 
-                // Disable smoothing for sharper edges
-                ctx.imageSmoothingEnabled = false;
-                ctx.drawImage(img, 0, 0, w, h);
+                    // --- Gentle Unsharp Mask to enhance edges ---
+                    let imageData = ctx.getImageData(0, 0, w, h);
+                    this.unsharpMask(imageData, w, h, 1, 0.6, 2);
+                    ctx.putImageData(imageData, 0, 0);
 
-                let imageData = ctx.getImageData(0, 0, w, h);
-                const data = imageData.data;
+                    // --- Proceed with the advanced filtering pipeline ---
+                    imageData = ctx.getImageData(0, 0, w, h);
+                    this.enhancedGrayscale(imageData.data);
 
-                // Stage 1: Enhanced grayscale with luminance correction
-                this.enhancedGrayscale(data);
+                    // Auto-invert detection: check if text is light on dark background
+                    const shouldInvert = this.shouldAutoInvert(imageData);
+                    if (shouldInvert) {
+                        this.invertImage(imageData.data);
+                        console.log('🔄 Auto-inverted image for light text on dark background');
+                    }
 
-                // Stage 2: Noise reduction using bilateral filter
-                imageData = this.bilateralFilter(imageData, w, h);
+                    imageData = this.bilateralFilter(imageData, w, h); // Noise reduction
+                    imageData = this.applyCLAHE(imageData, w, h); // Contrast enhancement
+                    const thr = this.advancedAdaptiveThreshold(imageData.data, w, h); // Binarization
+                    this.hysteresisBinarization(imageData.data, thr, w, h);
+                    this.morphologicalOperations(imageData.data, w, h); // Cleanup
 
-                // Stage 3: Contrast enhancement using CLAHE (Contrast Limited Adaptive Histogram Equalization)
-                imageData = this.applyCLAHE(imageData, w, h);
+                    ctx.putImageData(imageData, 0, 0);
 
-                // Stage 4: Advanced adaptive thresholding with morphological operations
-                const threshold = this.advancedAdaptiveThreshold(imageData.data, w, h);
+                    // Store processed image stats for quality assessment
+                    this._lastProcessed = {
+                        url: canvas.toDataURL('image/png'),
+                        w,
+                        h,
+                        canvas,
+                        shouldInvert
+                    };
 
-                // Stage 5: Binarization with hysteresis thresholding
-                this.hysteresisBinarization(imageData.data, threshold, w, h);
-
-                // Stage 6: Morphological operations to clean up text
-                this.morphologicalOperations(imageData.data, w, h);
-
-                ctx.putImageData(imageData, 0, 0);
-                resolve(canvas.toDataURL('image/png'));
+                    resolve(this._lastProcessed.url);
+                } catch (error) {
+                    console.error('Image preprocessing failed:', error);
+                    reject('Failed to preprocess image.');
+                }
             };
+            img.onerror = () => reject('Failed to load image for preprocessing.');
             img.crossOrigin = 'anonymous';
-            img.src = dataUrl;
+            img.src = rotatedDataUrl;
         });
     }
 
@@ -1429,104 +1443,39 @@ class ImageOCRTest {
         return threshold;
     }
 
-    // Perform multiple OCR passes with optimized configurations for different text types
+    // Perform multiple OCR passes with robust configurations for different text layouts
     async performMultipleOCRPasses(imageDataUrl) {
         if (!this.tesseractWorker) return [];
 
-        // Get image dimensions for adaptive configuration
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.src = imageDataUrl;
-        await new Promise(resolve => img.onload = resolve);
-        const aspectRatio = img.width / img.height;
-        const isSingleLine = img.height < 100;
-        const isSmallText = img.height < 200;
-
-        // Create separate workers for different configurations to avoid parameter conflicts
-        const workers = [];
-        const configurations = [
-            // Configuration 1: High accuracy for business cards and documents
-            {
-                tessedit_pageseg_mode: isSingleLine ? '7' : '6', // Single line or uniform block
-                preserve_interword_spaces: '1',
-                tessedit_char_whitelist: this.getCharacterWhitelist(),
-                tessedit_enable_doc_dict: '1',
-                language_model_penalty_non_freq_dict_word: '0.15',
-                language_model_penalty_non_dict_word: '0.15'
-            },
-            // Configuration 2: Conservative settings for clean text
-            {
-                tessedit_pageseg_mode: '3', // Fully automatic
-                preserve_interword_spaces: '1',
-                tessedit_char_whitelist: this.getCharacterWhitelist(),
-                tessedit_enable_doc_dict: '1',
-                tessedit_good_quality_unrej: '1',
-                tessedit_consistent_repa: '1'
-            },
-            // Configuration 3: Aggressive settings for noisy/difficult text
-            {
-                tessedit_pageseg_mode: '6',
-                preserve_interword_spaces: '1',
-                tessedit_char_whitelist: this.getCharacterWhitelist(),
-                tessedit_enable_doc_dict: '1',
-                language_model_penalty_non_freq_dict_word: '0.05',
-                language_model_penalty_non_dict_word: '0.05'
-            },
-            // Configuration 4: Single character mode for very small text
-            ...(isSmallText ? [{
-                tessedit_pageseg_mode: '10', // Single character
-                preserve_interword_spaces: '0',
-                tessedit_char_whitelist: this.getCharacterWhitelist(),
-                tessedit_enable_doc_dict: '1',
-                language_model_penalty_non_freq_dict_word: '0.01',
-                language_model_penalty_non_dict_word: '0.01'
-            }] : [])
+        const passes = [
+            { name: 'BlockText', params: { tessedit_pageseg_mode: '6' } }, // Assume a single uniform block of text.
+            { name: 'SingleLine', params: { tessedit_pageseg_mode: '7' } }, // Treat the image as a single text line.
+            { name: 'Sparse', params: { tessedit_pageseg_mode: '11' } }, // Find as much text as possible in no particular order.
         ];
 
         const results = [];
-
-        // Create workers for each configuration
-        for (const config of configurations) {
+        for (const p of passes) {
             try {
-                const worker = await Tesseract.createWorker(this.selectedLanguage, 1, {
-                    workerPath: './tesseract-local/worker.min.js',
-                    corePath: './tesseract-local/tesseract-core-simd-lstm.wasm.js',
-                    langPath: './tessdata/',
-                    logger: m => console.log('🔄 Worker status:', m.status, m.progress ? Math.round(m.progress * 100) + '%' : '')
+                await this.tesseractWorker.setParameters({
+                    tessedit_ocr_engine_mode: '1', // LSTM only
+                    tessedit_enable_doc_dict: '1',
+                    tessedit_char_whitelist: this.getCharacterWhitelist(),
+                    preserve_interword_spaces: '1',
+                    ...p.params,
                 });
-                await worker.setParameters(config);
-                workers.push(worker);
-            } catch (error) {
-                console.warn('Failed to create worker:', error);
+                const { data: { text, confidence } } = await this.tesseractWorker.recognize(imageDataUrl);
+                results.push({
+                    text: (text || '').trim(),
+                    confidence,
+                    config: p.name,
+                    score: this.calculateTextQualityScore(text, confidence)
+                });
+            } catch (e) {
+                console.warn(`OCR Pass [${p.name}] failed:`, e);
             }
         }
-
-        // Run OCR passes in parallel
-        const passPromises = workers.map(async (worker, index) => {
-            try {
-                const { data: { text, confidence } } = await worker.recognize(imageDataUrl);
-                return {
-                    text: text.trim(),
-                    confidence,
-                    config: configurations[index],
-                    score: this.calculateTextQualityScore(text, confidence)
-                };
-            } catch (error) {
-                console.warn('OCR pass failed:', error);
-                return null;
-            } finally {
-                // Clean up worker
-                try {
-                    await worker.terminate();
-                } catch (e) {
-                    console.warn('Worker cleanup failed:', e);
-                }
-            }
-        });
-
-        const passResults = await Promise.all(passPromises);
-        results.push(...passResults.filter(result => result !== null));
-
+        // Reset parameters to default after all passes
+        await this.resetTesseractParameters();
         return results;
     }
 
@@ -1746,46 +1695,57 @@ class ImageOCRTest {
 
     // Advanced adaptive thresholding with Sauvola method
     advancedAdaptiveThreshold(data, width, height) {
-        const blockSize = 15;
-        const k = 0.34; // Sauvola parameter
-        const R = 128; // Dynamic range of standard deviation
+        // Dynamically adjust block size based on image resolution
+        const blockSize = Math.max(15, Math.floor(width / 60));
+        const k = 0.2; // Adjusted k-value for better noise tolerance
+        const R = 128;
 
+        const integralImg = new Float32Array(width * height);
+        const integralImgSq = new Float32Array(width * height);
+
+        // Compute integral images
         for (let y = 0; y < height; y++) {
+            let rowSum = 0;
+            let rowSumSq = 0;
             for (let x = 0; x < width; x++) {
                 const index = y * width + x;
-                let sum = 0;
-                let sumSq = 0;
-                let count = 0;
-
-                // Calculate local statistics
-                for (let i = -Math.floor(blockSize / 2); i <= Math.floor(blockSize / 2); i++) {
-                    for (let j = -Math.floor(blockSize / 2); j <= Math.floor(blockSize / 2); j++) {
-                        const nx = x + j;
-                        const ny = y + i;
-                        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                            const pixelValue = data[(ny * width + nx) * 4];
-                            sum += pixelValue;
-                            sumSq += pixelValue * pixelValue;
-                            count++;
-                        }
-                    }
-                }
-
-                const mean = sum / count;
-                const variance = (sumSq / count) - (mean * mean);
-                const stdDev = Math.sqrt(Math.max(0, variance));
-
-                // Sauvola threshold
-                const threshold = mean * (1 + k * ((stdDev / R) - 1));
-
-                // Apply threshold
                 const pixelValue = data[index * 4];
-                const binaryValue = pixelValue > threshold ? 255 : 0;
-                data[index * 4] = data[index * 4 + 1] = data[index * 4 + 2] = binaryValue;
+                rowSum += pixelValue;
+                rowSumSq += pixelValue * pixelValue;
+                integralImg[index] = (y > 0 ? integralImg[index - width] : 0) + rowSum;
+                integralImgSq[index] = (y > 0 ? integralImgSq[index - width] : 0) + rowSumSq;
             }
         }
 
-        return 128;
+        const thresholdedData = new Uint8ClampedArray(data.length);
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const index = y * width + x;
+                const halfBlock = Math.floor(blockSize / 2);
+                const x1 = Math.max(0, x - halfBlock);
+                const y1 = Math.max(0, y - halfBlock);
+                const x2 = Math.min(width - 1, x + halfBlock);
+                const y2 = Math.min(height - 1, y + halfBlock);
+
+                const count = (x2 - x1 + 1) * (y2 - y1 + 1);
+
+                const sum = integralImg[y2 * width + x2] - (x1 > 0 ? integralImg[y2 * width + x1 - 1] : 0) - (y1 > 0 ? integralImg[(y1 - 1) * width + x2] : 0) + (x1 > 0 && y1 > 0 ? integralImg[(y1 - 1) * width + x1 - 1] : 0);
+                const sumSq = integralImgSq[y2 * width + x2] - (x1 > 0 ? integralImgSq[y2 * width + x1 - 1] : 0) - (y1 > 0 ? integralImgSq[(y1 - 1) * width + x2] : 0) + (x1 > 0 && y1 > 0 ? integralImgSq[(y1 - 1) * width + x1 - 1] : 0);
+
+                const mean = sum / count;
+                const stdDev = Math.sqrt(Math.max(0, (sumSq / count) - (mean * mean)));
+                const threshold = mean * (1 + k * ((stdDev / R) - 1));
+
+                const pixelValue = data[index * 4];
+                const binaryValue = pixelValue > threshold ? 255 : 0;
+                const outIndex = index * 4;
+                thresholdedData[outIndex] = thresholdedData[outIndex + 1] = thresholdedData[outIndex + 2] = binaryValue;
+                thresholdedData[outIndex + 3] = 255;
+            }
+        }
+        // Copy back to original data array
+        data.set(thresholdedData);
+        return 128; // Return a default threshold for hysteresis
     }
 
     // Hysteresis binarization for better text connectivity
@@ -1871,40 +1831,109 @@ class ImageOCRTest {
         }
     }
 
-    // Legacy adaptive threshold method for backward compatibility
-    adaptiveThreshold(data, width, height) {
-        const blockSize = 15;
-        const C = -10;
-        const thresholded = new Uint8Array(width * height);
+    // Automatically detect and correct image orientation
+    async osdDeskew(dataUrl) {
+        if (!this.tesseractWorker) return dataUrl;
+        try {
+            // Set OSD parameters BEFORE calling recognize
+            await this.tesseractWorker.setParameters({ tessedit_pageseg_mode: '0' }); // OSD only
+            const { data: osd } = await this.tesseractWorker.recognize(dataUrl);
+            const deg = osd?.osd?.rotation ?? 0;
 
-        for (let y = 0; y < height; y++) {
-            for (let x = 0; x < width; x++) {
-                const index = y * width + x;
-                let sum = 0;
-                let count = 0;
+            // Only rotate if the angle is significant
+            if (!deg || Math.abs(deg) < 0.5) return dataUrl;
 
-                for (let i = -Math.floor(blockSize / 2); i <= Math.floor(blockSize / 2); i++) {
-                    for (let j = -Math.floor(blockSize / 2); j <= Math.floor(blockSize / 2); j++) {
-                        const nx = x + j;
-                        const ny = y + i;
-                        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                            sum += data[(ny * width + nx) * 4];
-                            count++;
+            console.log(`🔄 Auto-rotating image by ${deg} degrees.`);
+
+            // Rotate the image using canvas
+            return await new Promise(resolve => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const rad = -deg * Math.PI / 180; // OSD angle is counter-clockwise
+                    const w = img.naturalWidth,
+                        h = img.naturalHeight;
+                    const sin = Math.abs(Math.sin(rad)),
+                        cos = Math.abs(Math.cos(rad));
+                    canvas.width = Math.floor(w * cos + h * sin);
+                    canvas.height = Math.floor(w * sin + h * cos);
+                    const ctx = canvas.getContext('2d');
+                    ctx.translate(canvas.width / 2, canvas.height / 2);
+                    ctx.rotate(rad);
+                    ctx.imageSmoothingEnabled = true;
+                    ctx.drawImage(img, -w / 2, -h / 2);
+                    resolve(canvas.toDataURL('image/png'));
+                };
+                img.onerror = () => resolve(dataUrl); // Fallback to original if load fails
+                img.src = dataUrl;
+            });
+        } catch (error) {
+            console.warn('OSD deskew failed:', error);
+            return dataUrl; // Fallback to original on error
+        }
+    }
+
+    // Unsharp mask for sharpening text edges
+    unsharpMask(imageData, width, height, radius = 1, amount = 0.6, threshold = 2) {
+        const src = imageData.data;
+        const blur = new Uint8ClampedArray(src);
+        const kernel = [1, 2, 1, 2, 4, 2, 1, 2, 1]; // 3x3 Gaussian kernel
+        const ksum = 16;
+
+        const tmp = new Uint8ClampedArray(src.length);
+        // Simplified 2-pass Gaussian blur
+        const pass = (input, output) => {
+            for (let y = 1; y < height - 1; y++) {
+                for (let x = 1; x < width - 1; x++) {
+                    let sum = 0,
+                        p = 0;
+                    const idx = (y * width + x) * 4;
+                    for (let ky = -1; ky <= 1; ky++) {
+                        for (let kx = -1; kx <= 1; kx++) {
+                            const ii = ((y + ky) * width + (x + kx)) * 4;
+                            sum += input[ii] * kernel[p++];
                         }
                     }
+                    const v = sum / ksum | 0;
+                    output[idx] = output[idx + 1] = output[idx + 2] = v;
+                    output[idx + 3] = 255;
                 }
+            }
+        };
+        pass(src, tmp);
+        pass(tmp, blur);
 
-                const mean = sum / count;
-                thresholded[index] = data[index * 4] > mean + C ? 255 : 0;
+        // Apply sharpening: sharpened = original + amount * (original - blurred)
+        for (let i = 0; i < src.length; i += 4) {
+            const s = src[i],
+                b = blur[i];
+            const diff = s - b;
+            if (Math.abs(diff) > threshold) {
+                const val = s + amount * diff;
+                src[i] = src[i + 1] = src[i + 2] = Math.max(0, Math.min(255, val | 0));
             }
         }
+        return imageData;
+    }
 
-        for (let i = 0; i < data.length; i += 4) {
-            const index = i / 4;
-            data[i] = data[i + 1] = data[i + 2] = thresholded[index];
+    // Utility to reset Tesseract parameters to a default state
+    async resetTesseractParameters() {
+        if (this.tesseractWorker) {
+            try {
+                await this.tesseractWorker.setParameters({
+                    tessedit_pageseg_mode: '3',
+                    preserve_interword_spaces: '1',
+                    tessedit_char_whitelist: this.getCharacterWhitelist(),
+                    tessedit_enable_doc_dict: '1',
+                    language_model_penalty_non_freq_dict_word: '0.15',
+                    language_model_penalty_non_dict_word: '0.15',
+                    tessedit_good_quality_unrej: '0',
+                    tessedit_consistent_repa: '0'
+                });
+            } catch (error) {
+                console.warn('Failed to reset Tesseract parameters:', error);
+            }
         }
-
-        return 128;
     }
 }
 
