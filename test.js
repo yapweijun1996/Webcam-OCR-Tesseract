@@ -33,25 +33,50 @@ class ImageOCRTest {
         console.log('🚀 Starting OCR initialization...');
         try {
             console.log('📋 Initializing Tesseract worker with local files...');
+            console.log('🔍 Language data path:', './tessdata/');
+            console.log('🔍 Language file expected:', `./tessdata/${this.selectedLanguage}.traineddata`);
             this.setStatus('Initializing OCR...', 'warning');
             this.tesseractWorker = await Tesseract.createWorker(this.selectedLanguage, 1, {
                 // Explicitly define local paths for offline use
                 workerPath: './tesseract-local/worker.min.js',
                 corePath: './tesseract-local/tesseract-core-simd-lstm.wasm.js',
-                langPath: './', // Use local language files
+                langPath: './tessdata/', // Use local language files
                 logger: m => {
                     console.log('🔄 Tesseract status:', m.status, m.progress ? Math.round(m.progress * 100) + '%' : '');
                     if (m.status === 'loading language traineddata') {
+                        console.log('📚 Language data loading progress:', Math.round(m.progress * 100) + '%');
                         this.setStatus(`Loading ${this.selectedLanguage} model...`, 'warning');
+                    }
+                    if (m.status === 'initialized') {
+                        console.log('✅ Language data loaded successfully for:', this.selectedLanguage);
                     }
                 },
             });
             console.log('✅ Tesseract worker initialized successfully');
+            console.log('✅ Language data verified for:', this.selectedLanguage);
             this.setStatus('OCR Ready', 'success');
         } catch (error) {
             console.error('❌ Failed to initialize Tesseract worker:', error);
+            console.error('❌ Language data error for:', this.selectedLanguage);
             this.showError('Could not initialize the OCR engine. Please refresh the page.');
             this.setStatus('OCR Init Failed', 'error');
+        }
+    }
+
+    async loadLanguage(lang) {
+        if (!this.tesseractWorker) {
+            this.showError('OCR worker not initialized.');
+            return;
+        }
+        try {
+            this.setStatus(`Loading ${lang} model...`, 'warning');
+            await this.tesseractWorker.loadLanguage(lang);
+            await this.tesseractWorker.initialize(lang);
+            this.setStatus('Language model loaded', 'success');
+        } catch (error) {
+            console.error(`Failed to load language ${lang}:`, error);
+            this.showError(`Failed to load language model for ${lang}.`);
+            this.setStatus('Language Error', 'error');
         }
     }
 
@@ -151,7 +176,10 @@ class ImageOCRTest {
     }
 
     async processImageOCR() {
-        if (this.isProcessing || !this.selectedImageFile) {
+        if (this.isProcessing || !this.selectedImageFile || !this.tesseractWorker) {
+            if (!this.tesseractWorker) {
+                this.showError('OCR engine is not ready.');
+            }
             return;
         }
 
@@ -484,19 +512,17 @@ class ImageOCRTest {
     // Strict re-extraction of email and website with single-line PSM and limited charset
     async extractEntitiesFromImage(imageDataUrl) {
         const results = { email: null, website: null };
+        if (!this.tesseractWorker) return results;
+
         try {
             // Email pass
-            const emailRes = await Tesseract.recognize(
-                imageDataUrl,
-                'eng',
-                {
-                    logger: () => {},
-                    tessedit_pageseg_mode: '7', // single line
-                    tessedit_ocr_engine_mode: '2',
-                    preserve_interword_spaces: '1',
-                    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-@'
-                }
-            );
+            await this.tesseractWorker.setParameters({
+                tessedit_pageseg_mode: '7', // single line
+                tessedit_ocr_engine_mode: '2',
+                preserve_interword_spaces: '1',
+                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._%+-@'
+            });
+            const emailRes = await this.tesseractWorker.recognize(imageDataUrl);
             const emailText = (emailRes?.data?.text || '').trim();
             const emailMatch = emailText.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
             if (emailMatch) {
@@ -504,17 +530,13 @@ class ImageOCRTest {
             }
 
             // Website pass
-            const webRes = await Tesseract.recognize(
-                imageDataUrl,
-                'eng',
-                {
-                    logger: () => {},
-                    tessedit_pageseg_mode: '7', // single line
-                    tessedit_ocr_engine_mode: '2',
-                    preserve_interword_spaces: '1',
-                    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-/:'
-                }
-            );
+            await this.tesseractWorker.setParameters({
+                tessedit_pageseg_mode: '7', // single line
+                tessedit_ocr_engine_mode: '2',
+                preserve_interword_spaces: '1',
+                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-/:'
+            });
+            const webRes = await this.tesseractWorker.recognize(imageDataUrl);
             let webText = (webRes?.data?.text || '').trim();
             // Normalize spacing in domain
             webText = webText.replace(/www\s*\.\s*/gi, 'www.').replace(/([A-Za-z0-9-])\s*\.\s*([A-Za-z0-9-])/g, '$1.$2');
@@ -605,6 +627,8 @@ class ImageOCRTest {
 
     // Perform multiple OCR passes with different configurations
     async performMultipleOCRPasses(imageDataUrl) {
+        if (!this.tesseractWorker) return [];
+
         const configurations = [
             {
                 tessedit_pageseg_mode: '6', // Uniform block of text
@@ -633,14 +657,8 @@ class ImageOCRTest {
         const results = [];
         for (const config of configurations) {
             try {
-                const { data: { text, confidence } } = await Tesseract.recognize(
-                    imageDataUrl,
-                    this.selectedLanguage,
-                    {
-                        logger: () => {}, // Disable logging for individual passes
-                        ...config
-                    }
-                );
+                await this.tesseractWorker.setParameters(config);
+                const { data: { text, confidence } } = await this.tesseractWorker.recognize(imageDataUrl);
                 results.push({ text: text.trim(), confidence, config });
             } catch (error) {
                 console.warn('OCR pass failed:', error);
@@ -723,7 +741,20 @@ class ImageOCRTest {
     }
 }
 
-// Initialize application when DOM is loaded
-document.addEventListener('DOMContentLoaded', () => {
-    window.imageOCRTest = new ImageOCRTest();
-});
+// Load Tesseract.js local script first
+if (!document.querySelector('script[src*="tesseract"]')) {
+    const script = document.createElement('script');
+    script.src = './tesseract-local/tesseract.min.js';
+    script.onload = () => {
+        console.log('Tesseract.js loaded successfully from local files');
+        // Initialize application after Tesseract.js is loaded
+        window.imageOCRTest = new ImageOCRTest();
+    };
+    script.onerror = () => {
+        console.error('Failed to load local Tesseract.js');
+        if (document.querySelector('.status-text')) {
+            document.querySelector('.status-text').textContent = 'Failed to load OCR library';
+        }
+    };
+    document.head.appendChild(script);
+}

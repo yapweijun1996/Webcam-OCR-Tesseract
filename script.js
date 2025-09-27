@@ -60,7 +60,7 @@ class WebcamOCR {
                 // Explicitly define local paths for offline use
                 workerPath: './tesseract-local/worker.min.js',
                 corePath: './tesseract-local/tesseract-core-simd-lstm.wasm.js',
-                langPath: './', // Use local language files
+                langPath: './tessdata/', // Use local language files
                 logger: m => {
                     console.log('🔄 Tesseract status:', m.status, m.progress ? Math.round(m.progress * 100) + '%' : '');
                     if (m.status === 'loading language traineddata') {
