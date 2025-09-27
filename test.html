@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Image OCR Test - Upload images for text recognition using Tesseract.js">
+    <title>Image OCR Test - Tesseract.js Text Recognition</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <h1>Image OCR Test</h1>
+            <div class="status-indicator" id="statusIndicator">
+                <span class="status-dot"></span>
+                <span class="status-text">Ready</span>
+            </div>
+            <div class="top-loader" id="topLoader"></div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Image Upload Section -->
+            <section class="upload-section">
+                <div class="upload-container">
+                    <div class="upload-area" id="uploadArea">
+                        <div class="upload-content">
+                            <div class="upload-icon">📷</div>
+                            <h3>Upload Image for OCR</h3>
+                            <p>Click to select or drag and drop an image file</p>
+                            <input type="file" id="imageInput" accept="image/*" style="display: none;">
+                            <button id="selectImageBtn" class="btn btn-primary">Select Image</button>
+                        </div>
+                    </div>
+
+                    <div class="image-preview" id="imagePreview" style="display: none;">
+                        <img id="previewImage" src="" alt="Preview">
+                        <button id="removeImageBtn" class="btn btn-outline remove-btn">✕</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Controls Section -->
+            <section class="controls-section">
+                <div class="control-grid">
+                    <div class="control-group">
+                        <button id="ocrBtn" class="btn btn-primary" disabled style="grid-column: span 2;">
+                            🔍 Recognize Text
+                        </button>
+                    </div>
+
+                    <div class="control-group">
+                        <label for="languageSelect">Language Selection</label>
+                        <select id="languageSelect" class="language-select">
+                            <option value="eng" selected>English</option>
+                            <option value="chi_sim">中文简体 (Chinese Simplified)</option>
+                            <option value="eng+chi_sim">English + 中文简体</option>
+                            <option value="jpn">日本語 (Japanese)</option>
+                            <option value="kor">한국어 (Korean)</option>
+                            <option value="tha">ไทย (Thai)</option>
+                            <option value="ara">العربية (Arabic)</option>
+                            <option value="rus">Русский (Russian)</option>
+                            <option value="fra">Français (French)</option>
+                            <option value="deu">Deutsch (German)</option>
+                        </select>
+                        <div class="language-info">
+                            <small>Select OCR language before processing</small>
+                        </div>
+                    </div>
+
+                    <div class="control-group">
+                        <button id="clearBtn" class="btn btn-outline" style="grid-column: span 2;">
+                            Clear Results
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Results Section -->
+            <section class="results-section">
+                <div class="results-header">
+                    <h2>OCR Results</h2>
+                </div>
+
+                <div class="results-container">
+                    <div id="resultsList" class="results-list">
+                        <!-- Results will be inserted here -->
+                    </div>
+
+                    <div id="errorMessage" class="error-message" style="display: none;">
+                        <p class="error-text"></p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Processing Indicator -->
+            <div id="processingIndicator" class="processing-indicator" style="display: none;">
+                <div class="spinner"></div>
+                <p>Processing...</p>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>Image OCR Test with Tesseract.js</p>
+        </footer>
+    </div>
+
+    <script src="test.js"></script>
+</body>
+</html>

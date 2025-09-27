@@ -143,11 +143,16 @@ class WebcamOCR {
                             this.setStatus(`Recognizing... ${Math.round(m.progress * 100)}%`, 'warning');
                         }
                     },
-                    // Optimized Tesseract configuration for better accuracy
-                    tessedit_pageseg_mode: '6', // Uniform block of text
+                    // Enhanced Tesseract configuration for business cards
+                    tessedit_pageseg_mode: '11', // Sparse text
                     tessedit_ocr_engine_mode: '2', // Use LSTM OCR engine
                     preserve_interword_spaces: '1',
-                    tessedit_char_whitelist: this.getCharacterWhitelist()
+                    tessedit_char_whitelist: this.getCharacterWhitelist(),
+                    // Additional accuracy improvements
+                    tessedit_enable_doc_dict: '1',
+                    tessedit_pageseg_mode: '3', // Fully automatic page segmentation
+                    language_model_penalty_non_freq_dict_word: '0.15',
+                    language_model_penalty_non_dict_word: '0.15'
                 }
             );
 
@@ -304,6 +309,32 @@ class WebcamOCR {
             default:
                 return ''; // No whitelist for mixed languages
         }
+    }
+
+    preprocessImage(ctx) {
+        const imageData = ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height);
+        const data = imageData.data;
+
+        // Enhanced preprocessing for better OCR accuracy
+        for (let i = 0; i < data.length; i += 4) {
+            // Convert to grayscale using luminance formula
+            const gray = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+
+            // Apply contrast enhancement
+            let enhanced = gray;
+            if (gray < 128) {
+                enhanced = Math.max(0, gray - 30); // Darken shadows
+            } else {
+                enhanced = Math.min(255, gray + 20); // Brighten highlights
+            }
+
+            // Apply sharpening effect
+            enhanced = Math.max(0, Math.min(255, enhanced * 1.1));
+
+            data[i] = data[i + 1] = data[i + 2] = enhanced;
+        }
+
+        ctx.putImageData(imageData, 0, 0);
     }
 
     showProcessing(show) {
